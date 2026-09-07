@@ -16,6 +16,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug)]
 pub struct Layer {
     pub bounds: Rectangle,
+    pub backdrop_blur: Option<f32>,
     pub quads: quad::Batch,
     pub triangles: triangle::Batch,
     pub primitives: primitive::Batch,
@@ -27,7 +28,8 @@ pub struct Layer {
 
 impl Layer {
     pub fn is_empty(&self) -> bool {
-        self.quads.is_empty()
+        self.backdrop_blur.is_none()
+            && self.quads.is_empty()
             && self.triangles.is_empty()
             && self.primitives.is_empty()
             && self.images.is_empty()
@@ -50,6 +52,9 @@ impl Layer {
         let background = match background {
             Background::Color(color) => Background::Color(finite_color(color)),
             Background::Gradient(core::Gradient::Linear(mut linear)) => {
+                linear.reference_bounds = linear
+                    .reference_bounds
+                    .map(|bounds| bounds * transformation);
                 if !linear.angle.0.is_finite() {
                     linear.angle.0 = 0.0;
                 }
@@ -159,7 +164,7 @@ impl Layer {
                 bounds,
                 clip_bounds,
             } => {
-                self.draw_raster(image, bounds, clip_bounds, transformation);
+                self.draw_raster_transformed(image, bounds, clip_bounds, transformation);
             }
             Image::Vector {
                 svg,
@@ -172,6 +177,17 @@ impl Layer {
     }
 
     pub fn draw_raster(
+        &mut self,
+        mut image: core::Image,
+        bounds: Rectangle,
+        clip_bounds: Rectangle,
+        transformation: Transformation,
+    ) {
+        image.blur = normalize_blur(image.blur);
+        self.draw_raster_transformed(image, bounds, clip_bounds, transformation);
+    }
+
+    fn draw_raster_transformed(
         &mut self,
         image: core::Image,
         bounds: Rectangle,
@@ -192,6 +208,7 @@ impl Layer {
             <[f32; 4]>::from(image.border_radius).map(|radius| scale_length(radius, scale));
         let image = Image::Raster {
             image: core::Image {
+                blur: scale_length(image.blur, scale),
                 border_radius: core::border::Radius {
                     top_left,
                     top_right,
@@ -311,6 +328,9 @@ impl Layer {
 }
 
 impl graphics::Layer for Layer {
+    fn is_barrier(&self) -> bool {
+        self.backdrop_blur.is_some()
+    }
     fn with_bounds(bounds: Rectangle) -> Self {
         Self {
             bounds,
@@ -333,6 +353,7 @@ impl graphics::Layer for Layer {
 
     fn reset(&mut self) {
         self.bounds = Rectangle::INFINITE;
+        self.backdrop_blur = None;
 
         self.quads.clear();
         self.triangles.clear();
@@ -404,6 +425,7 @@ impl Default for Layer {
     fn default() -> Self {
         Self {
             bounds: Rectangle::INFINITE,
+            backdrop_blur: None,
             quads: quad::Batch::default(),
             triangles: triangle::Batch::default(),
             primitives: primitive::Batch::default(),
@@ -448,5 +470,13 @@ fn finite_color(color: Color) -> Color {
         g: graphics::shape::normalize_smoothing(color.g),
         b: graphics::shape::normalize_smoothing(color.b),
         a: graphics::shape::normalize_smoothing(color.a),
+    }
+}
+
+pub(crate) fn normalize_blur(radius: f32) -> f32 {
+    if radius.is_nan() || radius <= 0.0 {
+        0.0
+    } else {
+        radius.min(128.0)
     }
 }

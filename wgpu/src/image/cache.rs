@@ -21,6 +21,17 @@ pub struct Cache {
 }
 
 impl Cache {
+    pub fn source_revision(&self, handle: &core::image::Handle) -> (u64, bool) {
+        #[cfg(feature = "image")]
+        {
+            self.raster.cache.source_revision(handle)
+        }
+        #[cfg(not(feature = "image"))]
+        {
+            let _ = handle;
+            (0, false)
+        }
+    }
     pub fn new(
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
@@ -194,12 +205,10 @@ impl Cache {
         encoder: &mut wgpu::CommandEncoder,
         belt: &mut wgpu::util::StagingBelt,
         handle: &core::image::Handle,
-    ) -> Option<(&atlas::Entry, &Arc<wgpu::BindGroup>)> {
+    ) -> Option<(&atlas::Entry, &Arc<wgpu::BindGroup>, u64)> {
         use crate::image::raster::Memory;
 
-        self.receive();
-
-        let memory = load_image(
+        let _ = load_image(
             &mut self.raster.cache,
             &mut self.raster.pending,
             #[cfg(not(target_arch = "wasm32"))]
@@ -207,6 +216,8 @@ impl Cache {
             handle,
             None,
         )?;
+        let revision = self.raster.cache.source_revision(handle).0;
+        let memory = self.raster.cache.get_mut(handle)?;
 
         if let Memory::Device {
             entry, bind_group, ..
@@ -215,6 +226,7 @@ impl Cache {
             return Some((
                 entry,
                 bind_group.as_ref().unwrap_or(self.atlas.bind_group()),
+                revision,
             ));
         }
 
@@ -235,7 +247,7 @@ impl Cache {
             };
 
             if let Memory::Device { entry, .. } = memory {
-                return Some((entry, self.atlas.bind_group()));
+                return Some((entry, self.atlas.bind_group(), revision));
             }
         }
 

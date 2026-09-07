@@ -1,5 +1,5 @@
 //! Colors that transition progressively.
-use crate::{Color, Radians};
+use crate::{Color, Radians, Rectangle};
 
 use std::cmp::Ordering;
 
@@ -47,6 +47,13 @@ pub struct Linear {
     pub angle: Radians,
     /// [`ColorStop`]s along the linear gradient path.
     pub stops: [Option<ColorStop>; 8],
+    /// Optional frame used to evaluate the gradient instead of the painted quad.
+    ///
+    /// Coordinates are in the same logical renderer space as the quad bounds
+    /// and follow the same translation, scale, and viewport transformation.
+    /// This changes only gradient coordinates, not the quad's rounded mask.
+    /// `None` (the default) evaluates the gradient in the quad's own bounds.
+    pub reference_bounds: Option<Rectangle>,
 }
 
 impl Linear {
@@ -55,7 +62,18 @@ impl Linear {
         Self {
             angle: angle.into(),
             stops: [None; 8],
+            reference_bounds: None,
         }
+    }
+
+    /// Anchors this gradient to an independent logical frame.
+    ///
+    /// For example, use a full Hero image frame while painting through a
+    /// smaller rounded glass button. The original gradient endpoints and
+    /// colors remain unchanged, including at diagonally projected corners.
+    pub fn reference_bounds(mut self, bounds: Rectangle) -> Self {
+        self.reference_bounds = Some(bounds);
+        self
     }
 
     /// Adds a new [`ColorStop`], defined by an offset and a color, to the gradient.

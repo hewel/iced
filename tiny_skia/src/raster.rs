@@ -11,12 +11,14 @@ use std::collections::hash_map;
 #[derive(Debug)]
 pub struct Pipeline {
     cache: RefCell<Cache>,
+    blur: BlurCache,
 }
 
 impl Pipeline {
     pub fn new() -> Self {
         Self {
             cache: RefCell::new(Cache::default()),
+            blur: BlurCache::default(),
         }
     }
 
@@ -43,6 +45,7 @@ impl Pipeline {
         pixels: &mut tiny_skia::PixmapMut<'_>,
         clip_mask: &tiny_skia::Mask,
         clip_bounds: Rectangle,
+        sigma: f32,
     ) {
         let mut cache = self.cache.borrow_mut();
 
@@ -74,6 +77,18 @@ impl Pipeline {
         if opacity == 0.0 {
             return;
         }
+        let (source, crop) = if sigma > 0.0 {
+            let source = self.blur.prepare(image, source, crop, bounds.size(), sigma);
+            let crop = Rectangle {
+                x: 0,
+                y: 0,
+                width: source.width(),
+                height: source.height(),
+            };
+            (source, crop)
+        } else {
+            (source, crop)
+        };
         let (sin, cos) = rotation.sin_cos();
         let center = bounds.center();
         let stride = pixels.width() as usize;
@@ -138,6 +153,19 @@ impl Pipeline {
 
     pub fn trim_cache(&mut self) {
         self.cache.borrow_mut().trim();
+        let cache = self.cache.borrow();
+        self.blur
+            .entries
+            .retain(|entry| cache.entries.contains_key(&entry.key.id));
+    }
+
+    pub fn blur_statistics(&self) -> crate::core::renderer::BlurStatistics {
+        crate::core::renderer::BlurStatistics {
+            image_hits: self.blur.hits,
+            image_misses: self.blur.misses,
+            retained_bytes: self.blur.retained_bytes(),
+            ..Default::default()
+        }
     }
 }
 
@@ -212,4 +240,146 @@ struct Entry {
     width: u32,
     height: u32,
     pixels: Vec<u32>,
+}
+
+#[derive(Debug, PartialEq)]
+struct BlurKey {
+    id: raster::Id,
+    crop: Rectangle<u32>,
+    size: Size,
+    sigma: f32,
+    filter: raster::FilterMethod,
+}
+
+#[derive(Debug)]
+struct Blurred {
+    key: BlurKey,
+    width: u32,
+    height: u32,
+    pixels: Vec<u32>,
+}
+
+#[derive(Debug, Default)]
+struct BlurCache {
+    entries: Vec<Blurred>,
+    scratch: Vec<u32>,
+    hits: u64,
+    misses: u64,
+}
+
+impl BlurCache {
+    fn retained_bytes(&self) -> usize {
+        self.scratch.capacity() * 4
+            + self
+                .entries
+                .iter()
+                .map(|entry| entry.pixels.capacity() * 4)
+                .sum::<usize>()
+    }
+
+    fn prepare(
+        &mut self,
+        image: &raster::Image,
+        source: tiny_skia::PixmapRef<'_>,
+        crop: Rectangle<u32>,
+        size: Size,
+        sigma: f32,
+    ) -> tiny_skia::PixmapRef<'_> {
+        let key = BlurKey {
+            id: image.handle.id(),
+            crop,
+            size,
+            sigma,
+            filter: image.filter_method,
+        };
+        let index = if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            self.hits += 1;
+            index
+        } else {
+            self.misses += 1;
+            // Isolated full-content renditions, capped at 2048 on either axis.
+            // Large blur kernels remain linear-time; no atlas neighbors leak in.
+            let reduction = (2048.0 / size.width.max(size.height)).min(1.0);
+            let width = (size.width * reduction).ceil().max(1.0) as u32;
+            let height = (size.height * reduction).ceil().max(1.0) as u32;
+            let count = width as usize * height as usize;
+            let mut pixels = if !self.entries.is_empty()
+                && (self.entries.len() >= 16
+                    || self.retained_bytes() + count * 4 > 64 * 1024 * 1024)
+            {
+                self.entries.remove(0).pixels
+            } else {
+                Vec::new()
+            };
+            if pixels.capacity() < count {
+                pixels.reserve_exact(count - pixels.len());
+            }
+            if self.scratch.capacity() < count {
+                self.scratch.reserve_exact(count - self.scratch.len());
+            }
+            while !self.entries.is_empty()
+                && self.retained_bytes() + pixels.capacity() * 4 > 64 * 1024 * 1024
+            {
+                drop(self.entries.remove(0));
+            }
+            pixels.resize(count, 0);
+            let sample = |x: i64, y: i64| {
+                let x = x.clamp(i64::from(crop.x), i64::from(crop.x + crop.width - 1)) as usize;
+                let y = y.clamp(i64::from(crop.y), i64::from(crop.y + crop.height - 1)) as usize;
+                let pixel = source.pixels()[y * source.width() as usize + x];
+                [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]
+            };
+            for y in 0..height {
+                for x in 0..width {
+                    let u = crop.x as f32 + (x as f32 + 0.5) / width as f32 * crop.width as f32;
+                    let v = crop.y as f32 + (y as f32 + 0.5) / height as f32 * crop.height as f32;
+                    let color = match image.filter_method {
+                        raster::FilterMethod::Nearest => sample(u.floor() as i64, v.floor() as i64),
+                        raster::FilterMethod::Linear => {
+                            let u = u - 0.5;
+                            let v = v - 0.5;
+                            let x = u.floor() as i64;
+                            let y = v.floor() as i64;
+                            let tx = u - u.floor();
+                            let ty = v - v.floor();
+                            let a = sample(x, y);
+                            let b = sample(x + 1, y);
+                            let c = sample(x, y + 1);
+                            let d = sample(x + 1, y + 1);
+                            std::array::from_fn(|channel| {
+                                ((f32::from(a[channel]) * (1.0 - tx) + f32::from(b[channel]) * tx)
+                                    * (1.0 - ty)
+                                    + (f32::from(c[channel]) * (1.0 - tx)
+                                        + f32::from(d[channel]) * tx)
+                                        * ty)
+                                    .round() as u8
+                            })
+                        }
+                    };
+                    pixels[y as usize * width as usize + x as usize] = u32::from_ne_bytes(color);
+                }
+            }
+            crate::blur::filter(
+                &mut pixels,
+                &mut self.scratch,
+                width as usize,
+                height as usize,
+                sigma * reduction,
+            );
+            self.entries.push(Blurred {
+                key,
+                width,
+                height,
+                pixels,
+            });
+            self.entries.len() - 1
+        };
+        let entry = &self.entries[index];
+        tiny_skia::PixmapRef::from_bytes(
+            bytemuck::cast_slice(&entry.pixels),
+            entry.width,
+            entry.height,
+        )
+        .expect("Blurred image pixels")
+    }
 }

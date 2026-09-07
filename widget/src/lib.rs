@@ -11,6 +11,7 @@ pub use core::widget::{Id, Void};
 
 mod action;
 mod column;
+mod modal;
 mod mouse_area;
 mod pin;
 mod responsive;
@@ -49,6 +50,7 @@ pub mod vertical_slider;
 mod helpers;
 
 pub use helpers::*;
+pub use modal::modal;
 
 #[doc(no_inline)]
 pub use button::Button;

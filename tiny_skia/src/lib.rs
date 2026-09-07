@@ -2,6 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 pub mod window;
 
+mod blur;
 mod engine;
 mod layer;
 mod primitive;
@@ -42,6 +43,8 @@ pub struct Renderer {
     settings: renderer::Settings,
     layers: layer::Stack,
     engine: Engine, // TODO: Shared engine
+    scene_blur: blur::Scene,
+    had_backdrop: bool,
 }
 
 impl Renderer {
@@ -50,6 +53,8 @@ impl Renderer {
             settings,
             layers: layer::Stack::new(),
             engine: Engine::new(),
+            scene_blur: blur::Scene::default(),
+            had_backdrop: false,
         }
     }
 
@@ -68,6 +73,17 @@ impl Renderer {
     ) {
         let scale_factor = viewport.scale_factor();
         self.layers.flush();
+        let has_backdrop = self
+            .layers
+            .iter()
+            .any(|layer| layer.backdrop_blur.is_some());
+        let full_damage = [Rectangle::with_size(viewport.logical_size())];
+        let damage = if has_backdrop || self.had_backdrop {
+            &full_damage[..]
+        } else {
+            damage
+        };
+        self.had_backdrop = has_backdrop;
 
         for &damage_bounds in damage {
             let damage_bounds = damage_bounds * scale_factor;
@@ -101,6 +117,14 @@ impl Renderer {
                     continue;
                 };
 
+                if let Some(radius) = layer.backdrop_blur {
+                    self.scene_blur.apply(
+                        pixels,
+                        layer_bounds,
+                        radius * scale_factor,
+                        scale_factor,
+                    );
+                }
                 engine::adjust_clip_mask(clip_mask, layer_bounds);
 
                 if !layer.quads.is_empty() {
@@ -187,6 +211,27 @@ impl Renderer {
 }
 
 impl core::Renderer for Renderer {
+    fn blur_backdrop(&mut self, radius: f32) {
+        let radius = blur::radius(radius);
+        if radius > 0.0 {
+            let (layer, transformation) = self.layers.barrier();
+            layer.backdrop_blur = Some(radius * transformation.scale_factor().abs());
+        }
+    }
+
+    fn blur_statistics(&self) -> renderer::BlurStatistics {
+        #[cfg(feature = "image")]
+        let image = self.engine.raster_pipeline.blur_statistics();
+        #[cfg(not(feature = "image"))]
+        let image = renderer::BlurStatistics::default();
+        renderer::BlurStatistics {
+            scene_hits: self.scene_blur.hits,
+            scene_misses: self.scene_blur.misses,
+            retained_bytes: self.scene_blur.retained_bytes() + image.retained_bytes,
+            ..image
+        }
+    }
+
     fn start_layer(&mut self, bounds: Rectangle) {
         self.layers.push_clip(bounds);
     }

@@ -38,6 +38,14 @@ where
     A: core::Renderer,
     B: core::Renderer,
 {
+    fn blur_backdrop(&mut self, radius: f32) {
+        delegate!(self, renderer, renderer.blur_backdrop(radius));
+    }
+
+    fn blur_statistics(&self) -> renderer::BlurStatistics {
+        delegate!(self, renderer, renderer.blur_statistics())
+    }
+
     fn fill_quad(&mut self, quad: renderer::Quad, background: impl Into<Background>) {
         delegate!(self, renderer, renderer.fill_quad(quad, background.into()));
     }

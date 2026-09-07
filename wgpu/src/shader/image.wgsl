@@ -91,7 +91,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let d_frame = shape_distance(fragment, input.clip_bounds, input.border_radius, input.smoothing);
     let q = abs(p - center) - input.bounds.zw * 0.5;
     let d_content = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
-    let coverage = shape_coverage(max(d_frame, d_content));
+    let coverage = select(shape_coverage(max(d_frame, d_content)), 1.0, (input.edges & 32u) != 0u);
     var uv = input.atlas.xy + (p - input.tile.xy) / input.tile.zw * input.atlas.zw;
     let half_texel = vec2(0.5) / vec2<f32>(textureDimensions(u_texture));
     // Clamp only at the selected crop boundary; internal seams sample the
@@ -100,6 +100,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.edges & 2u) != 0u { uv.y = max(uv.y, input.atlas.y + half_texel.y); }
     if (input.edges & 4u) != 0u { uv.x = min(uv.x, input.atlas.x + input.atlas.z - half_texel.x); }
     if (input.edges & 8u) != 0u { uv.y = min(uv.y, input.atlas.y + input.atlas.w - half_texel.y); }
+    if (input.edges & 32u) != 0u {
+        let dimensions = vec2<i32>(textureDimensions(u_texture));
+        if (input.edges & 64u) != 0u {
+            return premultiply(textureLoad(u_texture, clamp(vec2<i32>(uv * vec2<f32>(dimensions)), vec2(0), dimensions - vec2(1)), i32(input.layer), 0));
+        }
+        let texel = uv * vec2<f32>(dimensions) - vec2(0.5);
+        let low = vec2<i32>(floor(texel));
+        let fraction = fract(texel);
+        let a = premultiply(textureLoad(u_texture, clamp(low, vec2(0), dimensions - vec2(1)), i32(input.layer), 0));
+        let b = premultiply(textureLoad(u_texture, clamp(low + vec2(1, 0), vec2(0), dimensions - vec2(1)), i32(input.layer), 0));
+        let c = premultiply(textureLoad(u_texture, clamp(low + vec2(0, 1), vec2(0), dimensions - vec2(1)), i32(input.layer), 0));
+        let d = premultiply(textureLoad(u_texture, clamp(low + vec2(1, 1), vec2(0), dimensions - vec2(1)), i32(input.layer), 0));
+        return mix(mix(a, b, fraction.x), mix(c, d, fraction.x), fraction.y);
+    }
     let sample = textureSampleLevel(u_texture, u_sampler, uv, i32(input.layer), 0.0);
+    if (input.edges & 16u) != 0u { return sample * (coverage * input.opacity); }
     return premultiply(sample * vec4(1.0, 1.0, 1.0, coverage * input.opacity));
 }

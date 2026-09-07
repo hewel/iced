@@ -12,6 +12,13 @@ pub trait Layer: Default {
     /// Returns the current bounds of the [`Layer`].
     fn bounds(&self) -> Rectangle;
 
+    /// Whether this layer starts an ordered rendering barrier.
+    ///
+    /// Barriers must never be merged, even when they contain no primitives.
+    fn is_barrier(&self) -> bool {
+        false
+    }
+
     /// Flushes and settles any pending group of primitives in the [`Layer`].
     ///
     /// This will be called when a [`Layer`] is finished. It allows layers to efficiently
@@ -51,6 +58,7 @@ pub struct Stack<T: Layer> {
     previous: Vec<usize>,
     current: usize,
     active_count: usize,
+    barrier_floor: usize,
 }
 
 impl<T: Layer> Stack<T> {
@@ -62,6 +70,7 @@ impl<T: Layer> Stack<T> {
             previous: vec![],
             current: 0,
             active_count: 1,
+            barrier_floor: 0,
         }
     }
 
@@ -78,6 +87,31 @@ impl<T: Layer> Stack<T> {
     #[inline]
     pub fn transformation(&self) -> Transformation {
         self.transformations.last().copied().unwrap()
+    }
+
+    /// Starts a fresh ordered segment with the current clip and transformation.
+    ///
+    /// The caller marks the returned layer as a barrier. Restoring a parent clip
+    /// afterwards creates a new segment instead of drawing into the old parent.
+    pub fn barrier(&mut self) -> (&mut T, Transformation) {
+        self.flush();
+        for &index in &self.previous {
+            self.layers[index].flush();
+        }
+        let bounds = self.layers[self.current].bounds();
+        self.append(bounds);
+        self.barrier_floor = self.current;
+        self.current_mut()
+    }
+
+    fn append(&mut self, bounds: Rectangle) {
+        self.current = self.active_count;
+        self.active_count += 1;
+        if self.current == self.layers.len() {
+            self.layers.push(T::with_bounds(bounds));
+        } else {
+            self.layers[self.current].resize(bounds);
+        }
     }
 
     /// Pushes a new clipping region in the [`Stack`]; creating a new layer in the
@@ -104,6 +138,10 @@ impl<T: Layer> Stack<T> {
         self.flush();
 
         self.current = self.previous.pop().unwrap();
+        if self.current < self.barrier_floor {
+            let bounds = self.layers[self.current].bounds();
+            self.append(bounds);
+        }
     }
 
     /// Pushes a new [`Transformation`] in the [`Stack`].
@@ -151,6 +189,10 @@ impl<T: Layer> Stack<T> {
             // We set our target as the topmost layer left to process
             let mut current = left - 1;
             let mut target = &self.layers[current];
+            if target.is_barrier() {
+                left -= 1;
+                continue;
+            }
             let mut target_start = target.start();
             let mut target_index = current;
 
@@ -159,6 +201,9 @@ impl<T: Layer> Stack<T> {
                 current -= 1;
 
                 let candidate = &self.layers[current];
+                if candidate.is_barrier() {
+                    break;
+                }
                 let start = candidate.start();
                 let end = candidate.end();
 
@@ -210,6 +255,7 @@ impl<T: Layer> Stack<T> {
         self.layers[0].resize(new_bounds);
         self.current = 0;
         self.active_count = 1;
+        self.barrier_floor = 0;
         self.previous.clear();
     }
 }

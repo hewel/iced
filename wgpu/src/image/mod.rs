@@ -23,6 +23,12 @@ pub use crate::graphics::Image;
 
 pub type Batch = Vec<Image>;
 
+pub fn needs_streaming(images: &[Image]) -> bool {
+    images
+        .iter()
+        .any(|image| matches!(image, Image::Raster { image, .. } if image.blur > 0.0))
+}
+
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     raw: wgpu::RenderPipeline,
@@ -31,6 +37,7 @@ pub struct Pipeline {
     linear_sampler: wgpu::Sampler,
     texture_layout: wgpu::BindGroupLayout,
     constant_layout: wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
 }
 
 impl Pipeline {
@@ -155,6 +162,7 @@ impl Pipeline {
             linear_sampler,
             texture_layout,
             constant_layout,
+            format,
         }
     }
 
@@ -175,6 +183,12 @@ pub struct State {
     prepare_layer: usize,
     nearest_instances: Vec<Instance>,
     linear_instances: Vec<Instance>,
+    blur: Option<crate::blur::Pipeline>,
+    blurred: Vec<(u64, crate::blur::Target)>,
+    scratch: Vec<crate::blur::Target>,
+    retired: Vec<crate::blur::Target>,
+    pub image_hits: u64,
+    pub image_misses: u64,
 }
 
 impl State {
@@ -189,7 +203,7 @@ impl State {
         belt: &mut wgpu::util::StagingBelt,
         encoder: &mut wgpu::CommandEncoder,
         cache: &mut Cache,
-        images: &Batch,
+        images: &[Image],
         transformation: Transformation,
         scale: f32,
     ) {
@@ -204,6 +218,14 @@ impl State {
 
         let layer = &mut self.layers[self.prepare_layer];
 
+        if self.blur.is_none()
+            && images
+                .iter()
+                .any(|image| matches!(image, Image::Raster { image, .. } if image.blur > 0.0))
+        {
+            self.blur = Some(crate::blur::Pipeline::new(device, pipeline.format));
+        }
+        let blur = self.blur.as_ref();
         let mut atlas: Option<Arc<wgpu::BindGroup>> = None;
 
         for image in images {
@@ -221,7 +243,7 @@ impl State {
                         continue;
                     }
 
-                    if let Some((atlas_entry, bind_group)) =
+                    if let Some((atlas_entry, bind_group, revision)) =
                         cache.upload_raster(device, encoder, belt, &image.handle)
                     {
                         match atlas.as_mut() {
@@ -236,24 +258,225 @@ impl State {
                             _ => {}
                         }
 
-                        add_instances(
-                            bounds,
-                            clip_bounds,
-                            scaled_radius(image.border_radius, scale, clip_bounds),
-                            image.border_smoothing,
-                            image.crop,
-                            f32::from(image.rotation),
-                            image.opacity,
-                            atlas_entry,
-                            match image.filter_method {
-                                crate::core::image::FilterMethod::Nearest => {
-                                    &mut self.nearest_instances
+                        if image.blur > 0.0 {
+                            let blur = blur.expect("image blur pipeline");
+                            let sigma = image.blur * scale;
+                            let size =
+                                crate::blur::rendition_size([bounds.width, bounds.height], sigma);
+                            let key = crate::blur::fingerprint(&(
+                                image.handle.id(),
+                                revision,
+                                image.crop,
+                                size,
+                                bounds.width.to_bits(),
+                                bounds.height.to_bits(),
+                                sigma.to_bits(),
+                                image.filter_method,
+                                atlas_entry,
+                            ));
+                            let index = self
+                                .blurred
+                                .iter()
+                                .position(|(candidate, _)| *candidate == key);
+                            let output = if let Some(index) = index {
+                                self.image_hits += 1;
+                                let entry = self.blurred.remove(index);
+                                self.blurred.push(entry);
+                                &self.blurred.last().unwrap().1
+                            } else {
+                                self.image_misses += 1;
+                                let mut take = || {
+                                    let mut target = self
+                                        .scratch
+                                        .pop()
+                                        .unwrap_or_else(|| blur.pooled_target(device, size));
+                                    target.size = size;
+                                    target
+                                };
+                                let source = take();
+                                let horizontal = take();
+                                if self.blurred.len() >= 16 {
+                                    retire_output(&mut self.retired, self.blurred.remove(0).1);
                                 }
-                                crate::core::image::FilterMethod::Linear => {
-                                    &mut self.linear_instances
+                                // A target can remain referenced by an earlier image in this
+                                // prepared frame. Retire it, but never overwrite it until trim
+                                // has released those bindings.
+                                let mut output = self
+                                    .retired
+                                    .iter()
+                                    .position(|target| Arc::strong_count(&target.binding) == 1)
+                                    .map(|index| self.retired.swap_remove(index))
+                                    .unwrap_or_else(|| blur.pooled_target(device, size));
+                                output.size = size;
+                                let mut rendition = Layer::new(
+                                    device,
+                                    &pipeline.constant_layout,
+                                    &pipeline.nearest_sampler,
+                                    &pipeline.linear_sampler,
+                                );
+                                let mut instances = Vec::new();
+                                let frame = Rectangle::new(
+                                    crate::core::Point::ORIGIN,
+                                    crate::core::Size::new(size[0] as f32, size[1] as f32),
+                                );
+                                add_instances(
+                                    frame,
+                                    frame,
+                                    border::radius(0),
+                                    0.0,
+                                    image.crop,
+                                    0.0,
+                                    1.0,
+                                    atlas_entry,
+                                    &mut instances,
+                                );
+                                // The isolated rendition has no edge coverage: its mask is applied only at final composition.
+                                for instance in &mut instances {
+                                    instance._edges |= 32;
+                                    if image.filter_method
+                                        == crate::core::image::FilterMethod::Nearest
+                                    {
+                                        instance._edges |= 64;
+                                    }
                                 }
-                            },
-                        );
+                                let (nearest, linear) = match image.filter_method {
+                                    crate::core::image::FilterMethod::Nearest => {
+                                        (instances.as_slice(), &[][..])
+                                    }
+                                    crate::core::image::FilterMethod::Linear => {
+                                        (&[][..], instances.as_slice())
+                                    }
+                                };
+                                rendition.push(bind_group, nearest, linear);
+                                rendition.prepare(
+                                    device,
+                                    encoder,
+                                    belt,
+                                    Transformation::orthographic(size[0], size[1]),
+                                    nearest,
+                                    linear,
+                                );
+                                {
+                                    let mut pass =
+                                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("isolated image rendition"),
+                                            color_attachments: &[Some(
+                                                wgpu::RenderPassColorAttachment {
+                                                    view: &source.view,
+                                                    depth_slice: None,
+                                                    resolve_target: None,
+                                                    ops: wgpu::Operations {
+                                                        load: wgpu::LoadOp::Clear(
+                                                            wgpu::Color::TRANSPARENT,
+                                                        ),
+                                                        store: wgpu::StoreOp::Store,
+                                                    },
+                                                },
+                                            )],
+                                            depth_stencil_attachment: None,
+                                            timestamp_writes: None,
+                                            occlusion_query_set: None,
+                                            multiview_mask: None,
+                                        });
+                                    pass.set_viewport(
+                                        0.0,
+                                        0.0,
+                                        size[0] as f32,
+                                        size[1] as f32,
+                                        0.0,
+                                        1.0,
+                                    );
+                                    pass.set_scissor_rect(0, 0, size[0], size[1]);
+                                    pass.set_pipeline(&pipeline.raw);
+                                    rendition.render(&mut pass);
+                                }
+                                blur.pass(
+                                    device,
+                                    encoder,
+                                    &source,
+                                    &horizontal.view,
+                                    size,
+                                    sigma * size[0] as f32 / bounds.width,
+                                    true,
+                                );
+                                blur.pass(
+                                    device,
+                                    encoder,
+                                    &horizontal,
+                                    &output.view,
+                                    size,
+                                    sigma * size[1] as f32 / bounds.height,
+                                    false,
+                                );
+                                self.scratch.extend([source, horizontal]);
+                                while self.scratch.len() > 2 {
+                                    drop(self.scratch.remove(0));
+                                }
+                                while self
+                                    .blurred
+                                    .iter()
+                                    .map(|(_, target)| target.bytes())
+                                    .sum::<usize>()
+                                    + output.bytes()
+                                    > 64 * 1024 * 1024
+                                {
+                                    retire_output(&mut self.retired, self.blurred.remove(0).1);
+                                }
+                                self.blurred.push((key, output));
+                                &self.blurred.last().unwrap().1
+                            };
+                            layer.push(bind_group, &self.nearest_instances, &self.linear_instances);
+                            let start = self.linear_instances.len();
+                            add_instances(
+                                bounds,
+                                clip_bounds,
+                                scaled_radius(image.border_radius, scale, clip_bounds),
+                                image.border_smoothing,
+                                image.crop,
+                                f32::from(image.rotation),
+                                image.opacity,
+                                atlas_entry,
+                                &mut self.linear_instances,
+                            );
+                            self.linear_instances
+                                .truncate(start + usize::from(self.linear_instances.len() > start));
+                            if let Some(instance) = self.linear_instances.get_mut(start) {
+                                instance._tile = instance._bounds;
+                                instance._atlas = [
+                                    0.0,
+                                    0.0,
+                                    output.size[0] as f32 / output.capacity[0] as f32,
+                                    output.size[1] as f32 / output.capacity[1] as f32,
+                                ];
+                                instance._layer = 0;
+                                instance._edges = 15 | 16;
+                            }
+                            layer.push(
+                                &output.binding,
+                                &self.nearest_instances,
+                                &self.linear_instances,
+                            );
+                        } else {
+                            add_instances(
+                                bounds,
+                                clip_bounds,
+                                scaled_radius(image.border_radius, scale, clip_bounds),
+                                image.border_smoothing,
+                                image.crop,
+                                f32::from(image.rotation),
+                                image.opacity,
+                                atlas_entry,
+                                match image.filter_method {
+                                    crate::core::image::FilterMethod::Nearest => {
+                                        &mut self.nearest_instances
+                                    }
+                                    crate::core::image::FilterMethod::Linear => {
+                                        &mut self.linear_instances
+                                    }
+                                },
+                            );
+                            layer.push(bind_group, &self.nearest_instances, &self.linear_instances);
+                        }
                     }
                 }
                 #[cfg(not(feature = "image"))]
@@ -303,6 +526,7 @@ impl State {
                             atlas_entry,
                             &mut self.nearest_instances,
                         );
+                        layer.push(bind_group, &self.nearest_instances, &self.linear_instances);
                     }
                 }
                 #[cfg(not(feature = "svg"))]
@@ -345,12 +569,40 @@ impl State {
     }
 
     pub fn trim(&mut self) {
+        // Drop bind groups before evicting textures from the rendition cache.
         for layer in &mut self.layers[..self.prepare_layer] {
             layer.clear();
         }
 
         self.prepare_layer = 0;
     }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.blurred
+            .iter()
+            .map(|(_, target)| target.bytes())
+            .sum::<usize>()
+            + self
+                .scratch
+                .iter()
+                .map(crate::blur::Target::bytes)
+                .sum::<usize>()
+            + self
+                .retired
+                .iter()
+                .map(crate::blur::Target::bytes)
+                .sum::<usize>()
+    }
+}
+
+fn retire_output(pool: &mut Vec<crate::blur::Target>, target: crate::blur::Target) {
+    while pool.len() >= 16
+        || pool.iter().map(crate::blur::Target::bytes).sum::<usize>() + target.bytes()
+            > 64 * 1024 * 1024
+    {
+        drop(pool.remove(0));
+    }
+    pool.push(target);
 }
 
 #[derive(Debug)]
@@ -363,12 +615,14 @@ struct Layer {
     linear: Vec<Group>,
     linear_layout: wgpu::BindGroup,
     linear_total: usize,
+    order: Vec<(bool, usize)>,
 }
 
 #[derive(Debug)]
 struct Group {
     atlas: Arc<wgpu::BindGroup>,
     instance_count: usize,
+    instance_start: usize,
 }
 
 impl Layer {
@@ -439,6 +693,7 @@ impl Layer {
             linear: Vec::new(),
             linear_layout,
             linear_total: 0,
+            order: Vec::new(),
         }
     }
 
@@ -484,10 +739,18 @@ impl Layer {
         let new_nearest = nearest.len() - self.nearest_total;
 
         if new_nearest > 0 {
-            self.nearest.push(Group {
-                atlas: atlas.clone(),
-                instance_count: new_nearest,
-            });
+            if let Some(&(false, index)) = self.order.last()
+                && self.nearest[index].atlas == *atlas
+            {
+                self.nearest[index].instance_count += new_nearest;
+            } else {
+                self.order.push((false, self.nearest.len()));
+                self.nearest.push(Group {
+                    atlas: atlas.clone(),
+                    instance_count: new_nearest,
+                    instance_start: self.nearest_total,
+                });
+            }
 
             self.nearest_total = nearest.len();
         }
@@ -495,10 +758,18 @@ impl Layer {
         let new_linear = linear.len() - self.linear_total;
 
         if new_linear > 0 {
-            self.linear.push(Group {
-                atlas: atlas.clone(),
-                instance_count: new_linear,
-            });
+            if let Some(&(true, index)) = self.order.last()
+                && self.linear[index].atlas == *atlas
+            {
+                self.linear[index].instance_count += new_linear;
+            } else {
+                self.order.push((true, self.linear.len()));
+                self.linear.push(Group {
+                    atlas: atlas.clone(),
+                    instance_count: new_linear,
+                    instance_start: self.linear_total,
+                });
+            }
 
             self.linear_total = linear.len();
         }
@@ -507,32 +778,22 @@ impl Layer {
     fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
 
-        let mut offset = 0;
-
-        if !self.nearest.is_empty() {
-            render_pass.set_bind_group(0, &self.nearest_layout, &[]);
-
-            for group in &self.nearest {
-                render_pass.set_bind_group(1, group.atlas.as_ref(), &[]);
-                render_pass.draw(0..6, offset..offset + group.instance_count as u32);
-
-                offset += group.instance_count as u32;
-            }
-        }
-
-        if !self.linear.is_empty() {
-            render_pass.set_bind_group(0, &self.linear_layout, &[]);
-
-            for group in &self.linear {
-                render_pass.set_bind_group(1, group.atlas.as_ref(), &[]);
-                render_pass.draw(0..6, offset..offset + group.instance_count as u32);
-
-                offset += group.instance_count as u32;
-            }
+        for &(linear, index) in &self.order {
+            let (groups, layout, base) = if linear {
+                (&self.linear, &self.linear_layout, self.nearest_total)
+            } else {
+                (&self.nearest, &self.nearest_layout, 0)
+            };
+            let offset = (base + groups[index].instance_start) as u32;
+            let group = &groups[index];
+            render_pass.set_bind_group(0, layout, &[]);
+            render_pass.set_bind_group(1, group.atlas.as_ref(), &[]);
+            render_pass.draw(0..6, offset..offset + group.instance_count as u32);
         }
     }
 
     fn clear(&mut self) {
+        self.order.clear();
         self.nearest.clear();
         self.nearest_total = 0;
 

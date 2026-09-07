@@ -160,7 +160,10 @@ pub fn pack(gradient: &core::Gradient, bounds: Rectangle) -> Packed {
                 pack_f16s([offsets[6], offsets[7]]),
             ];
 
-            let (start, end) = bounds.chord(linear.angle);
+            let (start, end) = linear
+                .reference_bounds
+                .unwrap_or(bounds)
+                .chord(linear.angle);
 
             let direction = [start.x, start.y, end.x, end.y];
 

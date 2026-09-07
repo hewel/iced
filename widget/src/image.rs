@@ -54,6 +54,7 @@ pub fn viewer<Handle>(handle: Handle) -> Viewer<Handle> {
 /// }
 /// ```
 /// <img src="https://github.com/iced-rs/iced/blob/9712b319bb7a32848001b96bd84977430f14b623/examples/resources/ferris.png?raw=true" width="300">
+#[derive(Debug, Clone)]
 pub struct Image<Handle = image::Handle> {
     handle: Handle,
     width: Length,
@@ -68,6 +69,11 @@ pub struct Image<Handle = image::Handle> {
     scale: f32,
     expand: bool,
     snap: bool,
+    blur: f32,
+    display_frame: Option<Rectangle>,
+    visible_region: Option<Rectangle>,
+    mask_frame: Option<Rectangle>,
+    tint: Option<crate::core::Background>,
 }
 
 impl<Handle> Image<Handle> {
@@ -87,7 +93,61 @@ impl<Handle> Image<Handle> {
             scale: 1.0,
             expand: false,
             snap: renderer::CRISP,
+            blur: 0.0,
+            display_frame: None,
+            visible_region: None,
+            mask_frame: None,
+            tint: None,
         }
+    }
+
+    /// Blurs the complete cropped image before applying its rounded mask.
+    ///
+    /// `sigma` is in logical pixels; NaN and non-positive values are sharp,
+    /// and positive values clamp to 128.
+    pub fn blur(mut self, sigma: f32) -> Self {
+        self.blur = sigma;
+        self
+    }
+
+    /// Uses a display frame relative to this widget's layout origin.
+    ///
+    /// Fit, crop, rotation, scale, rounding, and tint all use this frame.
+    /// A glass button can reuse a Hero's handle and image settings, with the
+    /// Hero frame translated into the button's local coordinates. Scrolling
+    /// then moves both frames naturally, without source-pixel or atlas UV math.
+    pub fn display_frame(mut self, frame: Rectangle) -> Self {
+        self.display_frame = Some(frame);
+        self
+    }
+
+    /// Clips drawing to a region relative to this widget's layout origin.
+    ///
+    /// This does not change image fitting, blur inputs, or the rounded mask.
+    /// For a progress strip, keep the full-card display frame and reveal a
+    /// four-pixel-high region whose width is `card_width * progress`.
+    pub fn visible_region(mut self, region: Rectangle) -> Self {
+        self.visible_region = Some(region);
+        self
+    }
+
+    /// Overrides the rounded mask frame in widget-local coordinates.
+    ///
+    /// By default the mask follows the display frame. Set this to the button's
+    /// own bounds when sampling a larger Hero through a rounded glass button.
+    /// The visible region remains an independent rectangular reveal.
+    pub fn mask_frame(mut self, frame: Rectangle) -> Self {
+        self.mask_frame = Some(frame);
+        self
+    }
+
+    /// Paints a color or gradient after the image blur and before foreground.
+    ///
+    /// Gradients stay aligned to the display frame, even with a separate mask.
+    /// Compose crisp labels and normal buttons above this image with `stack`.
+    pub fn tint(mut self, tint: impl Into<crate::core::Background>) -> Self {
+        self.tint = Some(tint.into());
+        self
     }
 
     /// Sets the width of the [`Image`] boundaries.
@@ -323,6 +383,8 @@ pub fn draw<Renderer, Handle>(
     opacity: f32,
     scale: f32,
     snap: bool,
+    blur: f32,
+    mask_frame: Option<Rectangle>,
 ) where
     Renderer: image::Renderer<Handle = Handle>,
     Handle: Clone,
@@ -344,9 +406,10 @@ pub fn draw<Renderer, Handle>(
             filter_method,
             rotation: rotation.radians(),
             opacity,
+            blur,
         },
         drawing_bounds,
-        bounds,
+        mask_frame.unwrap_or(bounds),
     );
 }
 
@@ -391,20 +454,64 @@ where
         _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
-        draw(
-            renderer,
-            layout,
-            &self.handle,
-            self.crop,
-            self.border_radius,
-            self.border_smoothing,
-            self.content_fit,
-            self.filter_method,
-            self.rotation,
-            self.opacity,
-            self.scale,
-            self.snap,
-        );
+        let origin = Vector::new(layout.bounds().x, layout.bounds().y);
+        let frame = self
+            .display_frame
+            .map_or(layout.bounds(), |frame| frame + origin);
+        let mask = self.mask_frame.map_or(frame, |mask| mask + origin);
+        let visible = self
+            .visible_region
+            .map_or(layout.bounds(), |region| region + origin);
+        let Some(visible) = visible.intersection(_viewport) else {
+            return;
+        };
+        let node = layout::Node::new(frame.size()).move_to(frame.position());
+        let render = |renderer: &mut Renderer| {
+            draw(
+                renderer,
+                Layout::new(&node),
+                &self.handle,
+                self.crop,
+                self.border_radius,
+                self.border_smoothing,
+                self.content_fit,
+                self.filter_method,
+                self.rotation,
+                self.opacity,
+                self.scale,
+                self.snap,
+                self.blur,
+                Some(mask),
+            );
+        };
+        if self.display_frame.is_some() || self.visible_region.is_some() || self.tint.is_some() {
+            renderer.with_layer(visible, render);
+        } else {
+            render(renderer);
+        }
+        if let Some(tint) = self.tint {
+            let tint = match tint {
+                crate::core::Background::Gradient(crate::core::Gradient::Linear(linear)) => {
+                    linear.reference_bounds(frame).into()
+                }
+                color => color,
+            };
+            renderer.with_layer(visible, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: mask,
+                        border: crate::core::Border {
+                            radius: self.border_radius,
+                            smoothing: self.border_smoothing,
+                            ..Default::default()
+                        },
+                        snap: self.snap,
+                        ..Default::default()
+                    },
+                    tint,
+                );
+            });
+        }
     }
 }
 

@@ -271,6 +271,7 @@ impl geometry::frame::Backend for Frame {
         let mut image = image.into();
         let scale = self.transform.sx.hypot(self.transform.ky);
         image.border_radius = crate::engine::scaled_radius(image.border_radius, scale);
+        image.blur = crate::blur::radius(image.blur) * scale;
 
         let (bounds, external_rotation) = transform_rectangle(bounds, self.transform);
 

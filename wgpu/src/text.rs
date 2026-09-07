@@ -70,6 +70,33 @@ impl Cache {
     }
 }
 
+pub(crate) fn scene_fingerprint(batch: &Batch) -> u64 {
+    let mut key = crate::blur::fingerprint(batch);
+    for item in batch {
+        let text = match item {
+            Item::Group { text, .. } => text.as_slice(),
+            Item::Cached { cache, .. } => cache.text.as_ref(),
+        };
+        for text in text {
+            let buffer_key = match text {
+                Text::Paragraph { paragraph, .. } => paragraph
+                    .upgrade()
+                    .map(|p| crate::blur::fingerprint(p.buffer())),
+                Text::Editor { editor, .. } => editor
+                    .upgrade()
+                    .map(|e| crate::blur::fingerprint(e.buffer())),
+                Text::Raw { raw, .. } => raw
+                    .buffer
+                    .upgrade()
+                    .map(|b| crate::blur::fingerprint(b.as_ref())),
+                Text::Cached { .. } => None,
+            };
+            key = crate::blur::fingerprint(&(key, buffer_key));
+        }
+    }
+    key
+}
+
 struct Upload {
     renderer: cryoglyph::TextRenderer,
     buffer_cache: BufferCache,

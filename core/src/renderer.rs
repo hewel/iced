@@ -14,6 +14,19 @@ pub const CRISP: bool = cfg!(feature = "crisp");
 
 /// A component that can be used by widgets to draw themselves on a screen.
 pub trait Renderer {
+    /// Blurs everything recorded before this point within the current clip.
+    ///
+    /// Later drawing remains crisp. `radius` is approximate Gaussian sigma in
+    /// logical pixels; NaN and non-positive values do nothing, and positive
+    /// values including infinity clamp to 128. This is an ordering barrier,
+    /// not a scope: it has no matching end operation.
+    fn blur_backdrop(&mut self, radius: f32);
+
+    /// Returns cumulative blur cache counters and current resident allocation.
+    fn blur_statistics(&self) -> BlurStatistics {
+        BlurStatistics::default()
+    }
+
     /// Starts recording a new layer.
     fn start_layer(&mut self, bounds: Rectangle);
 
@@ -94,6 +107,21 @@ pub trait Renderer {
     ///
     /// By default, it does nothing.
     fn tick(&mut self) {}
+}
+
+/// Cumulative blur cache activity and current resident blur memory.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlurStatistics {
+    /// Reused image renditions.
+    pub image_hits: u64,
+    /// Newly computed image renditions.
+    pub image_misses: u64,
+    /// Reused lower-scene renditions.
+    pub scene_hits: u64,
+    /// Newly computed lower-scene renditions.
+    pub scene_misses: u64,
+    /// Resident blur allocations, including reusable pools, in bytes.
+    pub retained_bytes: usize,
 }
 
 /// A polygon with four sides.

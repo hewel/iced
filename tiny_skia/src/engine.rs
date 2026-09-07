@@ -81,7 +81,11 @@ impl Engine {
                 let Some(scratch) = self.scratch.as_mut() else {
                     return;
                 };
-                let (start, end) = bounds.chord(linear.angle);
+                let reference_bounds = linear
+                    .reference_bounds
+                    .map(|bounds| bounds * transformation)
+                    .unwrap_or(bounds);
+                let (start, end) = reference_bounds.chord(linear.angle);
                 let mut stops: Vec<_> = linear
                     .stops
                     .into_iter()
@@ -453,8 +457,15 @@ impl Engine {
                 let Some(clip_bounds) = frame_bounds.expand(0.5).intersection(&_clip_bounds) else {
                     return;
                 };
-                self.raster_pipeline
-                    .draw(image, bounds, &frame, _pixels, _clip_mask, clip_bounds);
+                self.raster_pipeline.draw(
+                    image,
+                    bounds,
+                    &frame,
+                    _pixels,
+                    _clip_mask,
+                    clip_bounds,
+                    image.blur * scale.abs(),
+                );
             }
             #[cfg(feature = "svg")]
             Image::Vector { svg, bounds, .. } => {

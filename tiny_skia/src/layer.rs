@@ -13,6 +13,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub bounds: Rectangle,
+    pub backdrop_blur: Option<f32>,
     pub quads: Vec<(Quad, Background)>,
     pub primitives: Vec<Item<Primitive>>,
     pub images: Vec<Image>,
@@ -23,10 +24,15 @@ impl Layer {
     pub fn draw_quad(
         &mut self,
         mut quad: Quad,
-        background: Background,
+        mut background: Background,
         transformation: Transformation,
     ) {
         quad.bounds = quad.bounds * transformation;
+        if let Background::Gradient(core::Gradient::Linear(linear)) = &mut background {
+            linear.reference_bounds = linear
+                .reference_bounds
+                .map(|bounds| bounds * transformation);
+        }
         let scale = transformation.scale_factor();
         quad.border.radius = crate::engine::scaled_radius(quad.border.radius, scale);
         quad.border.width = crate::engine::scaled_length(quad.border.width, scale);
@@ -135,7 +141,7 @@ impl Layer {
                 bounds,
                 clip_bounds,
             } => {
-                self.draw_raster(image, bounds, clip_bounds, transformation);
+                self.draw_raster_transformed(image, bounds, clip_bounds, transformation);
             }
             Image::Vector {
                 svg,
@@ -149,6 +155,17 @@ impl Layer {
 
     pub fn draw_raster(
         &mut self,
+        mut image: core::Image,
+        bounds: Rectangle,
+        clip_bounds: Rectangle,
+        transformation: Transformation,
+    ) {
+        image.blur = crate::blur::radius(image.blur);
+        self.draw_raster_transformed(image, bounds, clip_bounds, transformation);
+    }
+
+    fn draw_raster_transformed(
+        &mut self,
         image: core::Image,
         bounds: Rectangle,
         clip_bounds: Rectangle,
@@ -156,6 +173,7 @@ impl Layer {
     ) {
         let image = Image::Raster {
             image: core::Image {
+                blur: image.blur * transformation.scale_factor().abs(),
                 border_radius: crate::engine::scaled_radius(
                     image.border_radius,
                     transformation.scale_factor(),
@@ -333,6 +351,7 @@ impl Default for Layer {
     fn default() -> Self {
         Self {
             bounds: Rectangle::INFINITE,
+            backdrop_blur: None,
             quads: Vec::new(),
             primitives: Vec::new(),
             text: Vec::new(),
@@ -342,6 +361,10 @@ impl Default for Layer {
 }
 
 impl graphics::Layer for Layer {
+    fn is_barrier(&self) -> bool {
+        self.backdrop_blur.is_some()
+    }
+
     fn with_bounds(bounds: Rectangle) -> Self {
         Self {
             bounds,
@@ -361,6 +384,7 @@ impl graphics::Layer for Layer {
 
     fn reset(&mut self) {
         self.bounds = Rectangle::INFINITE;
+        self.backdrop_blur = None;
 
         self.quads.clear();
         self.primitives.clear();

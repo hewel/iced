@@ -41,9 +41,22 @@ pub struct Image<H = Handle> {
     ///
     /// 0 means transparent. 1 means opaque.
     pub opacity: f32,
+
+    /// Approximate Gaussian sigma in logical pixels, applied before masking.
+    ///
+    /// Non-positive values and NaN are sharp. Positive values (including
+    /// infinity) clamp to 128. The full cropped rendition is blurred, not
+    /// merely its visible clipping region.
+    pub blur: f32,
 }
 
 impl Image<Handle> {
+    /// Sets the blur sigma in logical pixels. See [`Self::blur`].
+    pub fn blur(mut self, sigma: f32) -> Self {
+        self.blur = sigma;
+        self
+    }
+
     /// Sets the radii of the unrotated display-frame corners.
     pub fn border_radius(mut self, radius: impl Into<border::Radius>) -> Self {
         self.border_radius = radius.into();
@@ -84,6 +97,7 @@ impl Image<Handle> {
             snap: crate::renderer::CRISP,
             crop: None,
             opacity: 1.0,
+            blur: 0.0,
         }
     }
 

@@ -212,6 +212,16 @@ pub(crate) fn frame_damage(
     previous_scale: f32,
     scale: f32,
 ) -> Option<Vec<Rectangle>> {
+    // A scene filter reads all lower pixels, not just the damaged output ROI.
+    // This also clears stale filtered pixels when the marker is removed and
+    // forces live resource rendering even if layer descriptors compare equal.
+    if previous
+        .iter()
+        .chain(current)
+        .any(|layer| layer.backdrop_blur.is_some())
+    {
+        return None;
+    }
     (previous_scale == scale).then(|| {
         damage::diff(
             previous,

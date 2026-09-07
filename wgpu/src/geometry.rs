@@ -392,6 +392,13 @@ impl geometry::frame::Backend for Frame {
         let scale = self.transforms.current.scale().0;
         let scale_radius =
             |radius| crate::graphics::shape::normalize_length(radius).min(f32::MAX / scale) * scale;
+        let blur_scale = self
+            .transforms
+            .current
+            .0
+            .m11
+            .hypot(self.transforms.current.0.m12);
+        image.blur = crate::layer::normalize_blur(image.blur) * blur_scale;
         image.border_radius = core::border::Radius {
             top_left: scale_radius(image.border_radius.top_left),
             top_right: scale_radius(image.border_radius.top_right),

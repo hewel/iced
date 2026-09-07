@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native corner smoothing for quad borders and raster image display frames in both `wgpu` and `tiny-skia`. `Border::smoothing` and `Image::border_smoothing` use a fixed-footprint superellipse; the default `0` retains circular corners, and `1` uses a quartic curve. This is not a Figma-equivalent parameter.
 - Explicit raster image source cropping and pixel snapping, with matching widget builders.
 - Interactive corner, thin-border, shadow, image crop/rotation, and window capture controls in `custom_quad`.
+- Native image-backed blur in `wgpu` and `tiny-skia`, using reusable isolated cropped-image renditions before the existing continuous-corner mask. `Image::blur` takes an approximate Gaussian sigma in logical pixels; non-positive values and NaN are sharp, and positive values clamp to 128.
+- Widget image `display_frame`, `mask_frame`, `visible_region`, and `tint` builders for glass buttons and full-card-masked progress strips. Linear gradients support an independent `reference_bounds` frame, keeping Hero fades aligned through smaller rounded masks.
+- Ordered live scene backdrop blur via `Renderer::blur_backdrop` and the drawing-only `widget::modal` wrapper. Background updates remain live; content above the marker stays sharp. Zero blur keeps the direct rendering path.
+- Cumulative `Renderer::blur_statistics`, shared offscreen blur regressions, an opt-in CPU/GPU timestamp measurement driver, and the `native_blur` manual acceptance example.
+
+### Changed
+- `Image` gains a public `blur` field and `gradient::Linear` gains `reference_bounds`; explicit struct literals must initialize them. Custom renderers must implement `Renderer::blur_backdrop`.
+- Advanced `wgpu::Renderer::draw` calls with positive scene blur require an explicit clear color; `None` cannot preserve pre-existing pixels in a render-attachment-only target. Normal window composition already supplies the clear color.
 
 ### Fixed
 - Consistent distance-based quad and image antialiasing, constant-width inside borders, and saturated borders without residual center fill.

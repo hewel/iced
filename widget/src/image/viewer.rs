@@ -21,6 +21,7 @@ pub struct Viewer<Handle> {
     handle: Handle,
     filter_method: FilterMethod,
     content_fit: ContentFit,
+    blur: f32,
 }
 
 impl<Handle> Viewer<Handle> {
@@ -36,7 +37,16 @@ impl<Handle> Viewer<Handle> {
             scale_step: 0.10,
             filter_method: FilterMethod::default(),
             content_fit: ContentFit::default(),
+            blur: 0.0,
         }
+    }
+
+    /// Sets approximate Gaussian sigma in logical pixels, before clipping.
+    ///
+    /// Non-positive values and NaN are sharp; positive values clamp to 128.
+    pub fn blur(mut self, sigma: f32) -> Self {
+        self.blur = sigma;
+        self
     }
 
     /// Sets the [`FilterMethod`] of the [`Viewer`].
@@ -337,6 +347,7 @@ where
                         filter_method: self.filter_method,
                         rotation: Radians(0.0),
                         opacity: 1.0,
+                        blur: self.blur,
                     },
                     drawing_bounds,
                     *viewport - translation,

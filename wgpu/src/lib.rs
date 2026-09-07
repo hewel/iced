@@ -29,6 +29,7 @@ pub mod window;
 #[cfg(feature = "geometry")]
 pub mod geometry;
 
+mod blur;
 mod buffer;
 mod color;
 mod engine;
@@ -80,9 +81,12 @@ pub struct Renderer {
     triangle: triangle::State,
     text: text::State,
     text_viewport: text::Viewport,
+    scene_blur: Option<blur::Scene>,
 
     #[cfg(any(feature = "svg", feature = "image"))]
     image: image::State,
+    #[cfg(any(feature = "svg", feature = "image"))]
+    streaming_image: image::State,
 
     // TODO: Centralize all the image feature handling
     #[cfg(any(feature = "svg", feature = "image"))]
@@ -102,9 +106,12 @@ impl Renderer {
             triangle: triangle::State::new(&engine.device, &engine.triangle_pipeline),
             text: text::State::new(),
             text_viewport: engine.text_pipeline.create_viewport(&engine.device),
+            scene_blur: None,
 
             #[cfg(any(feature = "svg", feature = "image"))]
             image: image::State::new(),
+            #[cfg(any(feature = "svg", feature = "image"))]
+            streaming_image: image::State::new(),
 
             #[cfg(any(feature = "svg", feature = "image"))]
             image_cache: std::cell::RefCell::new(engine.create_image_cache()),
@@ -125,12 +132,24 @@ impl Renderer {
     ///
     /// You must call [`finish`](Self::finish) and [`recall`](Self::recall) when submitting
     /// the resulting [`wgpu::CommandEncoder`].
+    ///
+    /// # Panics
+    /// A scene backdrop blur requires `clear_color` to be `Some`: existing
+    /// pixels in a render-attachment-only target cannot be sampled.
     pub fn draw(
         &mut self,
         clear_color: Option<Color>,
         target: &wgpu::TextureView,
         viewport: &Viewport,
     ) -> wgpu::CommandEncoder {
+        assert!(
+            clear_color.is_some()
+                || !self
+                    .layers
+                    .iter()
+                    .any(|layer| layer.backdrop_blur.is_some()),
+            "scene backdrop blur requires an explicit clear color"
+        );
         let mut encoder =
             self.engine
                 .device
@@ -280,6 +299,10 @@ impl Renderer {
     }
 
     fn prepare(&mut self, encoder: &mut wgpu::CommandEncoder, viewport: &Viewport) {
+        // Receive once: image readiness must not change between preparing
+        // a prefix image and computing that prefix's scene-cache identity.
+        #[cfg(feature = "image")]
+        self.image_cache.get_mut().receive();
         let scale_factor = viewport.scale_factor();
 
         self.text_viewport
@@ -357,7 +380,7 @@ impl Renderer {
             }
 
             #[cfg(any(feature = "svg", feature = "image"))]
-            if !layer.images.is_empty() {
+            if !layer.images.is_empty() && !image::needs_streaming(&layer.images) {
                 let prepare_span = debug::prepare(debug::Primitive::Image);
 
                 self.image.prepare(
@@ -402,6 +425,36 @@ impl Renderer {
     ) {
         use std::mem::ManuallyDrop;
 
+        let destination = frame;
+        let scene = self
+            .layers
+            .iter()
+            .any(|layer| layer.backdrop_blur.is_some());
+        let size = [viewport.physical_width(), viewport.physical_height()];
+        let intermediate = if scene {
+            let state = self
+                .scene_blur
+                .get_or_insert_with(|| blur::Scene::new(&self.engine.device, self.engine.format));
+            state.resize(&self.engine.device, size);
+            Some(state.source.as_ref().unwrap().view.clone())
+        } else {
+            None
+        };
+        let frame = intermediate.as_ref().unwrap_or(frame);
+        let mut prefix = if scene {
+            blur::fingerprint(&(
+                size,
+                viewport.scale_factor(),
+                clear_color,
+                graphics::text::font_system()
+                    .read()
+                    .expect("font system")
+                    .version(),
+            ))
+        } else {
+            0
+        };
+        let mut cacheable = true;
         let mut render_pass =
             ManuallyDrop::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("iced_wgpu render pass"),
@@ -447,6 +500,33 @@ impl Renderer {
         let scale = Transformation::scale(scale_factor);
 
         for layer in self.layers.iter() {
+            if let Some(radius) = layer.backdrop_blur {
+                let _ = ManuallyDrop::into_inner(render_pass);
+                prefix = blur::fingerprint(&(prefix, radius));
+                self.scene_blur.as_mut().unwrap().apply(
+                    &self.engine.device,
+                    encoder,
+                    cacheable.then_some(prefix),
+                    radius * scale_factor,
+                );
+                render_pass =
+                    ManuallyDrop::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("after backdrop blur"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: frame,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    }));
+            }
             let Some(physical_bounds) =
                 physical_bounds.intersection(&(layer.bounds * scale_factor))
             else {
@@ -599,15 +679,74 @@ impl Renderer {
             #[cfg(any(feature = "svg", feature = "image"))]
             if !layer.images.is_empty() {
                 let render_span = debug::render(debug::Primitive::Image);
-                self.image.render(
-                    &self.engine.image_pipeline,
-                    image_layer,
-                    scissor_rect,
-                    &mut render_pass,
-                );
+                if image::needs_streaming(&layer.images) {
+                    let _ = ManuallyDrop::into_inner(render_pass);
+                    for image in &layer.images {
+                        self.streaming_image.prepare(
+                            &self.engine.image_pipeline,
+                            &self.engine.device,
+                            &mut self.staging_belt,
+                            encoder,
+                            &mut self.image_cache.borrow_mut(),
+                            std::slice::from_ref(image),
+                            viewport.projection(),
+                            scale_factor,
+                        );
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("streamed image"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: frame,
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                            self.streaming_image.render(
+                                &self.engine.image_pipeline,
+                                0,
+                                scissor_rect,
+                                &mut pass,
+                            );
+                        }
+                        // Every consumer is now encoded before the next upload/blur.
+                        // Reusing textures and instance buffers is safe in command order.
+                        self.streaming_image.trim();
+                    }
+                    render_pass =
+                        ManuallyDrop::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("after streamed images"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: frame,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        }));
+                } else {
+                    self.image.render(
+                        &self.engine.image_pipeline,
+                        image_layer,
+                        scissor_rect,
+                        &mut render_pass,
+                    );
+                    image_layer += 1;
+                }
                 render_span.finish();
-
-                image_layer += 1;
             }
 
             if !layer.text.is_empty() {
@@ -622,9 +761,34 @@ impl Renderer {
                 );
                 render_span.finish();
             }
+            if scene {
+                cacheable &= layer.primitives.is_empty();
+                prefix = blur::fingerprint(&(prefix, layer, text::scene_fingerprint(&layer.text)));
+                #[cfg(any(feature = "svg", feature = "image"))]
+                for image in &layer.images {
+                    if let graphics::Image::Raster { image, .. } = image {
+                        prefix = blur::fingerprint(&(
+                            prefix,
+                            self.image_cache.borrow().source_revision(&image.handle),
+                        ));
+                    }
+                }
+            }
         }
 
         let _ = ManuallyDrop::into_inner(render_pass);
+        if scene {
+            let state = self.scene_blur.as_ref().unwrap();
+            state.pipeline.pass(
+                &self.engine.device,
+                encoder,
+                state.source.as_ref().unwrap(),
+                destination,
+                size,
+                0.0,
+                true,
+            );
+        }
 
         debug::layers_rendered(|| {
             self.layers
@@ -663,6 +827,31 @@ impl Renderer {
 }
 
 impl core::Renderer for Renderer {
+    fn blur_backdrop(&mut self, radius: f32) {
+        let radius = layer::normalize_blur(radius);
+        if radius == 0.0 {
+            return;
+        }
+        let (layer, transformation) = self.layers.barrier();
+        layer.backdrop_blur = Some(radius * transformation.scale_factor());
+    }
+
+    fn blur_statistics(&self) -> core::renderer::BlurStatistics {
+        let mut statistics = core::renderer::BlurStatistics::default();
+        if let Some(scene) = &self.scene_blur {
+            statistics.scene_hits = scene.hits;
+            statistics.scene_misses = scene.misses;
+            statistics.retained_bytes += scene.bytes();
+        }
+        #[cfg(any(feature = "svg", feature = "image"))]
+        {
+            statistics.image_hits = self.image.image_hits + self.streaming_image.image_hits;
+            statistics.image_misses = self.image.image_misses + self.streaming_image.image_misses;
+            statistics.retained_bytes +=
+                self.image.retained_bytes() + self.streaming_image.retained_bytes();
+        }
+        statistics
+    }
     fn start_layer(&mut self, bounds: Rectangle) {
         self.layers.push_clip(bounds);
     }

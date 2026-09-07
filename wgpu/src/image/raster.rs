@@ -55,9 +55,17 @@ pub struct Cache {
     map: FxHashMap<image::Id, Memory>,
     hits: FxHashSet<image::Id>,
     should_trim: bool,
+    pub revision: u64,
+    revisions: FxHashMap<image::Id, u64>,
 }
 
 impl Cache {
+    pub fn source_revision(&self, handle: &image::Handle) -> (u64, bool) {
+        (
+            self.revisions.get(&handle.id()).copied().unwrap_or(0),
+            matches!(self.map.get(&handle.id()), Some(Memory::Device { .. })),
+        )
+    }
     pub fn get_mut(&mut self, handle: &image::Handle) -> Option<&mut Memory> {
         let _ = self.hits.insert(handle.id());
 
@@ -65,6 +73,8 @@ impl Cache {
     }
 
     pub fn insert(&mut self, handle: &image::Handle, memory: Memory) {
+        self.revision = self.revision.wrapping_add(1);
+        let _ = self.revisions.insert(handle.id(), self.revision);
         let _ = self.map.insert(handle.id(), memory);
         let _ = self.hits.insert(handle.id());
 
@@ -96,6 +106,8 @@ impl Cache {
             let retain = hits.contains(id);
 
             if !retain {
+                self.revision = self.revision.wrapping_add(1);
+                let _ = self.revisions.remove(id);
                 log::debug!("Dropping image allocation: {id:?}");
 
                 if let Memory::Device {
