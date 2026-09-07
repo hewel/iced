@@ -60,12 +60,14 @@ pub struct Image<Handle = image::Handle> {
     height: Length,
     crop: Option<Rectangle<u32>>,
     border_radius: border::Radius,
+    border_smoothing: f32,
     content_fit: ContentFit,
     filter_method: FilterMethod,
     rotation: Rotation,
     opacity: f32,
     scale: f32,
     expand: bool,
+    snap: bool,
 }
 
 impl<Handle> Image<Handle> {
@@ -77,12 +79,14 @@ impl<Handle> Image<Handle> {
             height: Length::Shrink,
             crop: None,
             border_radius: border::Radius::default(),
+            border_smoothing: 0.0,
             content_fit: ContentFit::default(),
             filter_method: FilterMethod::default(),
             rotation: Rotation::default(),
             opacity: 1.0,
             scale: 1.0,
             expand: false,
+            snap: renderer::CRISP,
         }
     }
 
@@ -157,11 +161,13 @@ impl<Handle> Image<Handle> {
     /// as cropping it externally (e.g. with an image editor) and creating a new [`Handle`]
     /// for the cropped version.
     ///
-    /// However, this method is much more efficient; since it just leverages scissoring during
-    /// rendering and no image cropping actually takes place. Instead, it reuses the existing
-    /// image allocations and should be as efficient as not cropping at all!
+    /// Rendering reuses the existing image allocation and samples only the selected
+    /// source region, without allocating a cropped copy.
     ///
-    /// The `region` coordinates will be clamped to the image dimensions, if necessary.
+    /// Rendering intersects the requested `region` with the image dimensions.
+    /// An empty intersection draws nothing. Layout still uses the requested crop
+    /// size, capped to the image size, so partially out-of-bounds requests may
+    /// reserve different space than an externally cropped image.
     pub fn crop(mut self, region: Rectangle<u32>) -> Self {
         self.crop = Some(region);
         self
@@ -173,6 +179,23 @@ impl<Handle> Image<Handle> {
     /// of the [`Image`].
     pub fn border_radius(mut self, border_radius: impl Into<border::Radius>) -> Self {
         self.border_radius = border_radius.into();
+        self
+    }
+
+    /// Sets the corner smoothing of the [`Image`] bounding box.
+    ///
+    /// Values are clamped to the range `0.0..=1.0`. The default is `0.0`,
+    /// which produces circular corners.
+    pub fn border_smoothing(mut self, border_smoothing: f32) -> Self {
+        self.border_smoothing = border_smoothing;
+        self
+    }
+
+    /// Sets whether the [`Image`] content and display bounds snap to physical pixels.
+    ///
+    /// Defaults to [`renderer::CRISP`].
+    pub fn snap(mut self, snap: bool) -> Self {
+        self.snap = snap;
         self
     }
 }
@@ -231,12 +254,18 @@ fn drawing_bounds<Renderer, Handle>(
     content_fit: ContentFit,
     rotation: Rotation,
     scale: f32,
-) -> Rectangle
+) -> Option<Rectangle>
 where
     Renderer: image::Renderer<Handle = Handle>,
 {
-    let original_size = renderer.measure_image(handle).unwrap_or_default();
-    let image_size = crop(original_size, region);
+    let original_size = renderer.measure_image(handle)?;
+    let region = image::crop_bounds(original_size, region)?;
+
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+
+    let image_size = Size::new(region.width as f32, region.height as f32);
     let rotated_size = rotation.apply(image_size);
     let adjusted_fit = content_fit.fit(rotated_size, bounds.size());
 
@@ -246,37 +275,6 @@ where
     );
 
     let final_size = image_size * fit_scale * scale;
-
-    let (crop_offset, final_size) = if let Some(region) = region {
-        let x = region.x.min(original_size.width) as f32;
-        let y = region.y.min(original_size.height) as f32;
-        let width = image_size.width;
-        let height = image_size.height;
-
-        let ratio = Vector::new(
-            original_size.width as f32 / width,
-            original_size.height as f32 / height,
-        );
-
-        let final_size = final_size * ratio;
-
-        let scale = Vector::new(
-            final_size.width / original_size.width as f32,
-            final_size.height / original_size.height as f32,
-        );
-
-        let offset = match content_fit {
-            ContentFit::None => Vector::new(x * scale.x, y * scale.y),
-            _ => Vector::new(
-                ((original_size.width as f32 - width) / 2.0 - x) * scale.x,
-                ((original_size.height as f32 - height) / 2.0 - y) * scale.y,
-            ),
-        };
-
-        (offset, final_size)
-    } else {
-        (Vector::ZERO, final_size)
-    };
 
     let position = match content_fit {
         ContentFit::None => Point::new(
@@ -289,7 +287,15 @@ where
         ),
     };
 
-    Rectangle::new(position + crop_offset, final_size)
+    let bounds = Rectangle::new(position, final_size);
+
+    (bounds.x.is_finite()
+        && bounds.y.is_finite()
+        && bounds.width.is_finite()
+        && bounds.height.is_finite()
+        && bounds.width > 0.0
+        && bounds.height > 0.0)
+        .then_some(bounds)
 }
 
 fn crop(size: Size<u32>, region: Option<Rectangle<u32>>) -> Size<f32> {
@@ -310,23 +316,31 @@ pub fn draw<Renderer, Handle>(
     handle: &Handle,
     crop: Option<Rectangle<u32>>,
     border_radius: border::Radius,
+    border_smoothing: f32,
     content_fit: ContentFit,
     filter_method: FilterMethod,
     rotation: Rotation,
     opacity: f32,
     scale: f32,
+    snap: bool,
 ) where
     Renderer: image::Renderer<Handle = Handle>,
     Handle: Clone,
 {
     let bounds = layout.bounds();
-    let drawing_bounds =
-        drawing_bounds(renderer, bounds, handle, crop, content_fit, rotation, scale);
+    let Some(drawing_bounds) =
+        drawing_bounds(renderer, bounds, handle, crop, content_fit, rotation, scale)
+    else {
+        return;
+    };
 
     renderer.draw_image(
         image::Image {
             handle: handle.clone(),
             border_radius,
+            border_smoothing,
+            snap,
+            crop,
             filter_method,
             rotation: rotation.radians(),
             opacity,
@@ -383,11 +397,13 @@ where
             &self.handle,
             self.crop,
             self.border_radius,
+            self.border_smoothing,
             self.content_fit,
             self.filter_method,
             self.rotation,
             self.opacity,
             self.scale,
+            self.snap,
         );
     }
 }

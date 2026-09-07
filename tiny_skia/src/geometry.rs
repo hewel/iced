@@ -269,6 +269,8 @@ impl geometry::frame::Backend for Frame {
 
     fn draw_image(&mut self, bounds: Rectangle, image: impl Into<core::Image>) {
         let mut image = image.into();
+        let scale = self.transform.sx.hypot(self.transform.ky);
+        image.border_radius = crate::engine::scaled_radius(image.border_radius, scale);
 
         let (bounds, external_rotation) = transform_rectangle(bounds, self.transform);
 

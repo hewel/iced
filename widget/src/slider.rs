@@ -490,6 +490,7 @@ where
                 },
                 border: Border {
                     radius: handle_border_radius,
+                    smoothing: 0.0,
                     width: style.handle.border_width,
                     color: style.handle.border_color,
                 },
@@ -663,6 +664,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
             width: 4.0,
             border: Border {
                 radius: 2.0.into(),
+                smoothing: 0.0,
                 width: 0.0,
                 color: Color::TRANSPARENT,
             },

@@ -913,6 +913,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         handle_color: palette.background.weak.text,
         border: Border {
             radius: 2.0.into(),
+            smoothing: 0.0,
             width: 1.0,
             color: palette.background.strong.color,
         },

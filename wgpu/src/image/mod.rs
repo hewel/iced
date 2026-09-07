@@ -11,8 +11,8 @@ mod vector;
 
 use crate::Buffer;
 use crate::core::border;
-use crate::core::{Rectangle, Size, Transformation};
-use crate::graphics::Shell;
+use crate::core::{Rectangle, Transformation};
+use crate::graphics::{Shell, shape};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -104,6 +104,8 @@ impl Pipeline {
                 "\n",
                 include_str!("../shader/color.wgsl"),
                 "\n",
+                include_str!("../shader/shape.wgsl"),
+                "\n",
                 include_str!("../shader/image.wgsl"),
             ))),
         });
@@ -117,26 +119,7 @@ impl Pipeline {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: mem::size_of::<Instance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array!(
-                        // Center
-                        0 => Float32x2,
-                        // Clip bounds
-                        1 => Float32x4,
-                        // Border radius
-                        2 => Float32x4,
-                        // Tile
-                        3 => Float32x4,
-                        // Rotation
-                        4 => Float32,
-                        // Opacity
-                        5 => Float32,
-                        // Atlas position
-                        6 => Float32x2,
-                        // Atlas scale
-                        7 => Float32x2,
-                        // Layer
-                        8 => Sint32,
-                    ),
+                    attributes: &Instance::ATTRIBUTES,
                 }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -231,10 +214,10 @@ impl State {
                     bounds,
                     clip_bounds,
                 } => {
-                    let bounds = (*bounds * scale).round();
-                    let clip_bounds = (*clip_bounds * scale).round();
+                    let bounds = shape::snap(*bounds * scale, image.snap);
+                    let clip_bounds = shape::snap(*clip_bounds * scale, image.snap);
 
-                    if bounds.width < 1.0 || bounds.height < 1.0 {
+                    if !valid_bounds(bounds) || !valid_bounds(clip_bounds) {
                         continue;
                     }
 
@@ -256,7 +239,9 @@ impl State {
                         add_instances(
                             bounds,
                             clip_bounds,
-                            image.border_radius * scale,
+                            scaled_radius(image.border_radius, scale, clip_bounds),
+                            image.border_smoothing,
+                            image.crop,
                             f32::from(image.rotation),
                             image.opacity,
                             atlas_entry,
@@ -280,10 +265,10 @@ impl State {
                     bounds,
                     clip_bounds,
                 } => {
-                    let bounds = (*bounds * scale).round();
-                    let clip_bounds = (*clip_bounds * scale).round();
+                    let bounds = shape::snap(*bounds * scale, true);
+                    let clip_bounds = shape::snap(*clip_bounds * scale, true);
 
-                    if bounds.width < 1.0 || bounds.height < 1.0 {
+                    if !valid_bounds(bounds) || !valid_bounds(clip_bounds) {
                         continue;
                     }
 
@@ -293,7 +278,7 @@ impl State {
                         belt,
                         &svg.handle,
                         svg.color,
-                        Size::new(bounds.width as u32, bounds.height as u32),
+                        crate::core::Size::new(bounds.width as u32, bounds.height as u32),
                     ) {
                         match atlas.as_mut() {
                             None => {
@@ -311,6 +296,8 @@ impl State {
                             bounds,
                             clip_bounds,
                             border::radius(0),
+                            0.0,
+                            None,
                             f32::from(svg.rotation),
                             svg.opacity,
                             atlas_entry,
@@ -557,20 +544,89 @@ impl Layer {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
 struct Instance {
-    _center: [f32; 2],
+    _bounds: [f32; 4],
     _clip_bounds: [f32; 4],
     _border_radius: [f32; 4],
     _tile: [f32; 4],
+    _atlas: [f32; 4],
     _rotation: f32,
     _opacity: f32,
-    _position_in_atlas: [f32; 2],
-    _size_in_atlas: [f32; 2],
+    _border_smoothing: f32,
     _layer: u32,
+    _edges: u32,
 }
 
 impl Instance {
     pub const INITIAL: usize = 20;
+
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: mem::offset_of!(Self, _bounds) as u64,
+            shader_location: 0,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: mem::offset_of!(Self, _clip_bounds) as u64,
+            shader_location: 1,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: mem::offset_of!(Self, _border_radius) as u64,
+            shader_location: 2,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: mem::offset_of!(Self, _tile) as u64,
+            shader_location: 3,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: mem::offset_of!(Self, _atlas) as u64,
+            shader_location: 4,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: mem::offset_of!(Self, _rotation) as u64,
+            shader_location: 5,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: mem::offset_of!(Self, _opacity) as u64,
+            shader_location: 6,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: mem::offset_of!(Self, _border_smoothing) as u64,
+            shader_location: 7,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Uint32,
+            offset: mem::offset_of!(Self, _layer) as u64,
+            shader_location: 8,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Uint32,
+            offset: mem::offset_of!(Self, _edges) as u64,
+            shader_location: 9,
+        },
+    ];
 }
+
+const _: () = {
+    assert!(mem::size_of::<Instance>() == 100);
+    assert!(mem::align_of::<Instance>() == 4);
+    assert!(mem::offset_of!(Instance, _bounds) == 0);
+    assert!(mem::offset_of!(Instance, _clip_bounds) == 16);
+    assert!(mem::offset_of!(Instance, _border_radius) == 32);
+    assert!(mem::offset_of!(Instance, _tile) == 48);
+    assert!(mem::offset_of!(Instance, _atlas) == 64);
+    assert!(mem::offset_of!(Instance, _rotation) == 80);
+    assert!(mem::offset_of!(Instance, _opacity) == 84);
+    assert!(mem::offset_of!(Instance, _border_smoothing) == 88);
+    assert!(mem::offset_of!(Instance, _layer) == 92);
+    assert!(mem::offset_of!(Instance, _edges) == 96);
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
@@ -578,70 +634,78 @@ struct Uniforms {
     transform: [f32; 16],
 }
 
+fn valid_bounds(bounds: Rectangle) -> bool {
+    bounds.x.is_finite()
+        && bounds.y.is_finite()
+        && bounds.width.is_finite()
+        && bounds.height.is_finite()
+        && bounds.width > 0.0
+        && bounds.height > 0.0
+        && (bounds.x + bounds.width).is_finite()
+        && (bounds.y + bounds.height).is_finite()
+}
+
+fn scaled_radius(radius: border::Radius, scale: f32, frame: Rectangle) -> border::Radius {
+    let cap = frame.width.min(frame.height) / 2.0;
+    let scale_length = |value| shape::normalize_length(value).min(cap / scale) * scale;
+    border::Radius {
+        top_left: scale_length(radius.top_left),
+        top_right: scale_length(radius.top_right),
+        bottom_right: scale_length(radius.bottom_right),
+        bottom_left: scale_length(radius.bottom_left),
+    }
+}
+
 fn add_instances(
     bounds: Rectangle,
     clip_bounds: Rectangle,
     border_radius: border::Radius,
+    border_smoothing: f32,
+    crop: Option<Rectangle<u32>>,
     rotation: f32,
     opacity: f32,
     entry: &atlas::Entry,
     instances: &mut Vec<Instance>,
 ) {
-    let center = [
-        bounds.x + bounds.width / 2.0,
-        bounds.y + bounds.height / 2.0,
-    ];
-
-    let clip_bounds = [
-        clip_bounds.x,
-        clip_bounds.y,
-        clip_bounds.width,
-        clip_bounds.height,
-    ];
-
-    let border_radius = border_radius.into();
-
+    let Some(crop) = crate::core::image::crop_bounds(entry.size(), crop) else {
+        return;
+    };
+    if !rotation.is_finite() {
+        return;
+    }
+    let opacity = if opacity.is_nan() {
+        0.0
+    } else {
+        opacity.clamp(0.0, 1.0)
+    };
+    let template = Instance {
+        _bounds: [bounds.x, bounds.y, bounds.width, bounds.height],
+        _clip_bounds: [
+            clip_bounds.x,
+            clip_bounds.y,
+            clip_bounds.width,
+            clip_bounds.height,
+        ],
+        _border_radius: border_radius.into(),
+        _tile: [0.0; 4],
+        _atlas: [0.0; 4],
+        _rotation: rotation,
+        _opacity: opacity,
+        _border_smoothing: shape::normalize_smoothing(border_smoothing),
+        _layer: 0,
+        _edges: 0,
+    };
     match entry {
         atlas::Entry::Contiguous(allocation) => {
-            add_instance(
-                center,
-                clip_bounds,
-                border_radius,
-                [bounds.x, bounds.y, bounds.width, bounds.height],
-                rotation,
-                opacity,
-                allocation,
-                instances,
-            );
+            add_instance(template, crop, (0, 0), allocation, instances);
         }
-        atlas::Entry::Fragmented { fragments, size } => {
-            let scaling_x = bounds.width / size.width as f32;
-            let scaling_y = bounds.height / size.height as f32;
-
+        atlas::Entry::Fragmented { fragments, .. } => {
             for fragment in fragments {
-                let allocation = &fragment.allocation;
-                let (fragment_x, fragment_y) = fragment.position;
-
-                let Size {
-                    width: fragment_width,
-                    height: fragment_height,
-                } = allocation.size();
-
-                let tile = [
-                    bounds.x + fragment_x as f32 * scaling_x,
-                    bounds.y + fragment_y as f32 * scaling_y,
-                    fragment_width as f32 * scaling_x,
-                    fragment_height as f32 * scaling_y,
-                ];
-
                 add_instance(
-                    center,
-                    clip_bounds,
-                    border_radius,
-                    tile,
-                    rotation,
-                    opacity,
-                    allocation,
+                    template,
+                    crop,
+                    fragment.position,
+                    &fragment.allocation,
                     instances,
                 );
             }
@@ -649,36 +713,47 @@ fn add_instances(
     }
 }
 
-#[inline]
 fn add_instance(
-    center: [f32; 2],
-    clip_bounds: [f32; 4],
-    border_radius: [f32; 4],
-    tile: [f32; 4],
-    rotation: f32,
-    opacity: f32,
+    mut instance: Instance,
+    crop: Rectangle<u32>,
+    origin: (u32, u32),
     allocation: &atlas::Allocation,
     instances: &mut Vec<Instance>,
 ) {
-    let (x, y) = allocation.position();
-    let Size { width, height } = allocation.size();
-    let layer = allocation.layer();
-    let atlas_size = allocation.atlas_size();
-
-    let instance = Instance {
-        _center: center,
-        _clip_bounds: clip_bounds,
-        _border_radius: border_radius,
-        _tile: tile,
-        _rotation: rotation,
-        _opacity: opacity,
-        _position_in_atlas: [x as f32 / atlas_size as f32, y as f32 / atlas_size as f32],
-        _size_in_atlas: [
-            width as f32 / atlas_size as f32,
-            height as f32 / atlas_size as f32,
-        ],
-        _layer: layer as u32,
-    };
-
-    instances.push(instance);
+    let size = allocation.size();
+    let left = crop.x.max(origin.0);
+    let top = crop.y.max(origin.1);
+    let right = (crop.x + crop.width).min(origin.0 + size.width);
+    let bottom = (crop.y + crop.height).min(origin.1 + size.height);
+    if left >= right || top >= bottom {
+        return;
+    }
+    // Compute shared endpoints identically on both sides of a fragment seam.
+    let bounds = instance._bounds;
+    let x = |source: u32| bounds[0] + (source - crop.x) as f32 / crop.width as f32 * bounds[2];
+    let y = |source: u32| bounds[1] + (source - crop.y) as f32 / crop.height as f32 * bounds[3];
+    let tile_left = x(left);
+    let tile_top = y(top);
+    instance._tile = [
+        tile_left,
+        tile_top,
+        x(right) - tile_left,
+        y(bottom) - tile_top,
+    ];
+    let (atlas_x, atlas_y) = allocation.position();
+    let atlas_size = allocation.atlas_size() as f32;
+    instance._atlas = [
+        (atlas_x + left - origin.0) as f32 / atlas_size,
+        (atlas_y + top - origin.1) as f32 / atlas_size,
+        (right - left) as f32 / atlas_size,
+        (bottom - top) as f32 / atlas_size,
+    ];
+    instance._layer = allocation.layer() as u32;
+    instance._edges = u32::from(left == crop.x)
+        | (u32::from(top == crop.y) << 1)
+        | (u32::from(right == crop.x + crop.width) << 2)
+        | (u32::from(bottom == crop.y + crop.height) << 3);
+    if instance._tile[2] > 0.0 && instance._tile[3] > 0.0 {
+        instances.push(instance);
+    }
 }

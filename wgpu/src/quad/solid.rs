@@ -16,6 +16,13 @@ pub struct Solid {
     pub quad: Quad,
 }
 
+const _: () = {
+    assert!(std::mem::size_of::<Solid>() == 104);
+    assert!(std::mem::align_of::<Solid>() == 4);
+    assert!(std::mem::offset_of!(Solid, quad) == 16);
+    assert!(std::mem::offset_of!(Solid, quad) + std::mem::offset_of!(Quad, smoothing) == 100);
+};
+
 #[derive(Debug)]
 pub struct Layer {
     instances: Buffer<Solid>,
@@ -73,6 +80,8 @@ impl Pipeline {
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(concat!(
                 include_str!("../shader/color.wgsl"),
                 "\n",
+                include_str!("../shader/shape.wgsl"),
+                "\n",
                 include_str!("../shader/quad.wgsl"),
                 "\n",
                 include_str!("../shader/vertex.wgsl"),
@@ -90,28 +99,83 @@ impl Pipeline {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Solid>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array!(
-                        // Color
-                        0 => Float32x4,
-                        // Position
-                        1 => Float32x2,
-                        // Size
-                        2 => Float32x2,
-                        // Border color
-                        3 => Float32x4,
-                        // Border radius
-                        4 => Float32x4,
-                        // Border width
-                        5 => Float32,
-                        // Shadow color
-                        6 => Float32x4,
-                        // Shadow offset
-                        7 => Float32x2,
-                        // Shadow blur radius
-                        8 => Float32,
-                        // Snap
-                        9 => Uint32,
-                    ),
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: (std::mem::offset_of!(Solid, color)) as u64,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, position))
+                                as u64,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, size))
+                                as u64,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, border_color))
+                                as u64,
+                            shader_location: 3,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, border_radius))
+                                as u64,
+                            shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, border_width))
+                                as u64,
+                            shader_location: 5,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, shadow_color))
+                                as u64,
+                            shader_location: 6,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, shadow_offset))
+                                as u64,
+                            shader_location: 7,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, shadow_blur_radius))
+                                as u64,
+                            shader_location: 8,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, snap))
+                                as u64,
+                            shader_location: 9,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: (std::mem::offset_of!(Solid, quad)
+                                + std::mem::offset_of!(Quad, smoothing))
+                                as u64,
+                            shader_location: 10,
+                        },
+                    ],
                 }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },

@@ -1161,6 +1161,7 @@ name = "custom_quad"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "image",
 ]
 
 [[package]]

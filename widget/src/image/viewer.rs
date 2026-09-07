@@ -331,6 +331,9 @@ where
                     Image {
                         handle: self.handle.clone(),
                         border_radius: border::Radius::default(),
+                        border_smoothing: 0.0,
+                        snap: renderer::CRISP,
+                        crop: None,
                         filter_method: self.filter_method,
                         rotation: Radians(0.0),
                         opacity: 1.0,

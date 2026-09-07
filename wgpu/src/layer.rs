@@ -43,17 +43,37 @@ impl Layer {
         transformation: Transformation,
     ) {
         let bounds = quad.bounds * transformation;
+        let scale = transformation.scale_factor();
+        if !scale.is_finite() || scale <= 0.0 || !valid_shape_bounds(bounds) {
+            return;
+        }
+        let background = match background {
+            Background::Color(color) => Background::Color(finite_color(color)),
+            Background::Gradient(core::Gradient::Linear(mut linear)) => {
+                if !linear.angle.0.is_finite() {
+                    linear.angle.0 = 0.0;
+                }
+                for stop in linear.stops.iter_mut().flatten() {
+                    stop.color = finite_color(stop.color);
+                    stop.offset = graphics::shape::normalize_smoothing(stop.offset);
+                }
+                Background::Gradient(core::Gradient::Linear(linear))
+            }
+        };
 
         let quad = Quad {
             position: [bounds.x, bounds.y],
             size: [bounds.width, bounds.height],
-            border_color: color::pack(quad.border.color),
-            border_radius: (quad.border.radius * transformation.scale_factor()).into(),
-            border_width: quad.border.width * transformation.scale_factor(),
-            shadow_color: color::pack(quad.shadow.color),
-            shadow_offset: (quad.shadow.offset * transformation.scale_factor()).into(),
-            shadow_blur_radius: quad.shadow.blur_radius * transformation.scale_factor(),
+            border_color: color::pack(finite_color(quad.border.color)),
+            border_radius: <[f32; 4]>::from(quad.border.radius)
+                .map(|radius| scale_length(radius, scale)),
+            border_width: scale_length(quad.border.width, scale),
+            shadow_color: color::pack(finite_color(quad.shadow.color)),
+            shadow_offset: [quad.shadow.offset.x, quad.shadow.offset.y]
+                .map(|offset| scale_finite(offset, scale)),
+            shadow_blur_radius: scale_finite(quad.shadow.blur_radius, scale).max(0.0),
             snap: quad.snap as u32,
+            smoothing: graphics::shape::normalize_smoothing(quad.border.smoothing),
         };
 
         self.quads.add(quad, &background);
@@ -158,13 +178,31 @@ impl Layer {
         clip_bounds: Rectangle,
         transformation: Transformation,
     ) {
+        let scale = transformation.scale_factor();
+        let bounds = bounds * transformation;
+        let clip_bounds = clip_bounds * transformation;
+        if !scale.is_finite()
+            || scale <= 0.0
+            || !valid_shape_bounds(bounds)
+            || !valid_shape_bounds(clip_bounds)
+        {
+            return;
+        }
+        let [top_left, top_right, bottom_right, bottom_left] =
+            <[f32; 4]>::from(image.border_radius).map(|radius| scale_length(radius, scale));
         let image = Image::Raster {
             image: core::Image {
-                border_radius: image.border_radius * transformation.scale_factor(),
+                border_radius: core::border::Radius {
+                    top_left,
+                    top_right,
+                    bottom_right,
+                    bottom_left,
+                },
+                border_smoothing: graphics::shape::normalize_smoothing(image.border_smoothing),
                 ..image
             },
-            bounds: bounds * transformation,
-            clip_bounds: clip_bounds * transformation,
+            bounds,
+            clip_bounds,
         };
 
         self.images.push(image);
@@ -374,5 +412,41 @@ impl Default for Layer {
             pending_meshes: Vec::new(),
             pending_text: Vec::new(),
         }
+    }
+}
+
+fn valid_shape_bounds(bounds: Rectangle) -> bool {
+    bounds.x.is_finite()
+        && bounds.y.is_finite()
+        && bounds.width.is_finite()
+        && bounds.height.is_finite()
+        && bounds.width > 0.0
+        && bounds.height > 0.0
+        && (bounds.x + bounds.width).is_finite()
+        && (bounds.y + bounds.height).is_finite()
+}
+
+// Keep saturated lengths saturated through a layer transform; only the final
+// snapped physical bounds are allowed to cap a radius or border width.
+fn scale_length(value: f32, scale: f32) -> f32 {
+    (f64::from(graphics::shape::normalize_length(value)) * f64::from(scale))
+        .min(f64::from(f32::MAX)) as f32
+}
+
+fn scale_finite(value: f32, scale: f32) -> f32 {
+    if value.is_finite() {
+        (f64::from(value) * f64::from(scale)).clamp(-f64::from(f32::MAX), f64::from(f32::MAX))
+            as f32
+    } else {
+        0.0
+    }
+}
+
+fn finite_color(color: Color) -> Color {
+    Color {
+        r: graphics::shape::normalize_smoothing(color.r),
+        g: graphics::shape::normalize_smoothing(color.g),
+        b: graphics::shape::normalize_smoothing(color.b),
+        a: graphics::shape::normalize_smoothing(color.a),
     }
 }

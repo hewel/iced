@@ -402,6 +402,7 @@ where
                     bounds,
                     border: Border {
                         radius: (size / 2.0).into(),
+                        smoothing: 0.0,
                         width: style.border_width,
                         color: style.border_color,
                     },

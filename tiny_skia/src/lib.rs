@@ -413,3 +413,341 @@ impl renderer::Headless for Renderer {
         window::compositor::screenshot(self, &viewport, background_color)
     }
 }
+
+#[cfg(all(test, feature = "image"))]
+mod corner_smoothing_tests {
+    use super::*;
+    use crate::core::Renderer as _;
+    use crate::core::image::Renderer as _;
+
+    fn viewport(scale: f32) -> Viewport {
+        Viewport::with_physical_size(
+            Size::new(720, 720),
+            renderer::Scale {
+                window: 1.0,
+                application: scale,
+            },
+        )
+    }
+
+    fn scene(renderer: &mut Renderer, handle: &core::image::Handle, scale: f32, state: usize) {
+        renderer.reset(Rectangle::with_size(viewport(scale).logical_size()));
+        // A fixed layer keeps removals on the primitive-diff path, not the
+        // whole-layer fallback. The fractional snapped/rotated bottom edge
+        // extends past the old unsnapped expand(1) damage at scale one.
+        renderer.with_layer(
+            Rectangle::new(Point::new(1.0, 1.0), Size::new(170.0, 170.0)),
+            |renderer| {
+                renderer.with_translation(core::Vector::new(32.0, 32.0), |renderer| {
+                    if state != 4 {
+                        let image = core::Image::new(handle.clone())
+                            .rotation(core::Radians(std::f32::consts::FRAC_PI_4))
+                            .border_radius(core::border::top(24.0))
+                            .border_smoothing(if state == 0 { 0.0 } else { 0.6 })
+                            .snap(state != 3);
+                        let image = if state >= 2 {
+                            image.crop(Rectangle {
+                                x: 3,
+                                y: 2,
+                                width: 7,
+                                height: 9,
+                            })
+                        } else {
+                            image
+                        };
+                        renderer.draw_image(
+                            image,
+                            Rectangle {
+                                x: 0.499,
+                                y: -0.499,
+                                width: 98.002,
+                                height: 101.0,
+                            },
+                            Rectangle {
+                                x: -30.0,
+                                y: -30.0,
+                                width: 160.0,
+                                height: 160.0,
+                            },
+                        );
+                    }
+                    // This independent image must not inherit the first image's
+                    // display-frame mask, including on a partial damage redraw.
+                    renderer.draw_image(
+                        core::Image::new(handle.clone()).snap(false),
+                        Rectangle {
+                            x: 107.0,
+                            y: 4.0,
+                            width: 12.0,
+                            height: 18.0,
+                        },
+                        Rectangle {
+                            x: 107.0,
+                            y: 4.0,
+                            width: 12.0,
+                            height: 18.0,
+                        },
+                    );
+                });
+            },
+        );
+        renderer.with_transformation(
+            Transformation::translate(9.25, 140.5) * Transformation::scale(1.25),
+            |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: 0.25,
+                            y: 0.5,
+                            width: 28.0,
+                            height: 20.0,
+                        },
+                        border: core::Border::default()
+                            .rounded(8.0)
+                            .smoothing(if state == 0 { 0.0 } else { 0.6 })
+                            .width(1.0)
+                            .color(Color::WHITE),
+                        shadow: core::Shadow {
+                            color: Color::BLACK,
+                            offset: core::Vector::new(-3.0, 2.0),
+                            blur_radius: 4.0,
+                        },
+                        snap: state != 3,
+                    },
+                    Color::from_rgb(0.2, 0.5, 0.8),
+                );
+                renderer.draw_image(
+                    core::Image::new(handle.clone())
+                        .border_radius(8.0)
+                        .border_smoothing(0.6)
+                        .snap(false),
+                    Rectangle {
+                        x: 33.25,
+                        y: 0.5,
+                        width: 28.0,
+                        height: 20.0,
+                    },
+                    Rectangle {
+                        x: 33.25,
+                        y: 0.5,
+                        width: 28.0,
+                        height: 20.0,
+                    },
+                );
+            },
+        );
+    }
+
+    fn compare_transition(
+        renderer: &mut Renderer,
+        pixels: &mut tiny_skia::Pixmap,
+        mask: &mut tiny_skia::Mask,
+        previous: &[Layer],
+        previous_scale: f32,
+        scale: f32,
+        label: &str,
+    ) {
+        let viewport = viewport(scale);
+        let bounds = Rectangle::with_size(viewport.logical_size());
+        let damage =
+            window::compositor::frame_damage(previous, renderer.layers(), previous_scale, scale)
+                .unwrap_or_else(|| vec![bounds]);
+        let damage = graphics::damage::group(damage, bounds);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            mask,
+            &viewport,
+            &damage,
+            Color::TRANSPARENT,
+        );
+        let mut reference = tiny_skia::Pixmap::new(720, 720).unwrap();
+        renderer.draw(
+            &mut reference.as_mut(),
+            mask,
+            &viewport,
+            &[bounds],
+            Color::TRANSPARENT,
+        );
+        assert_eq!(
+            pixels.data(),
+            reference.data(),
+            "{label}, scale {previous_scale} -> {scale}"
+        );
+    }
+
+    #[test]
+    fn corner_smoothing_damage_matches_full_redraw() {
+        let rgba = (0..16 * 16)
+            .flat_map(|index| [(index % 16 * 16) as u8, (index / 16 * 16) as u8, 96, 255])
+            .collect::<Vec<_>>();
+        let handle = core::image::Handle::from_rgba(16, 16, rgba);
+        for scale in [1.0, 2.5, 4.0] {
+            let mut renderer = Renderer::new(renderer::Settings::default());
+            let mut pixels = tiny_skia::Pixmap::new(720, 720).unwrap();
+            let mut mask = tiny_skia::Mask::new(720, 720).unwrap();
+            scene(&mut renderer, &handle, scale, 0);
+            let bounds = Rectangle::with_size(viewport(scale).logical_size());
+            renderer.draw(
+                &mut pixels.as_mut(),
+                &mut mask,
+                &viewport(scale),
+                &[bounds],
+                Color::TRANSPARENT,
+            );
+            for (state, label) in [
+                (1, "smoothing"),
+                (2, "crop"),
+                (3, "snap"),
+                (0, "restore snapped image"),
+                (4, "remove rotated image"),
+            ] {
+                let previous = renderer.layers().to_vec();
+                scene(&mut renderer, &handle, scale, state);
+                compare_transition(
+                    &mut renderer,
+                    &mut pixels,
+                    &mut mask,
+                    &previous,
+                    scale,
+                    scale,
+                    label,
+                );
+            }
+            let previous = renderer.layers().to_vec();
+            let next_scale = if scale == 4.0 { 2.5 } else { 4.0 };
+            scene(&mut renderer, &handle, next_scale, 1);
+            compare_transition(
+                &mut renderer,
+                &mut pixels,
+                &mut mask,
+                &previous,
+                scale,
+                next_scale,
+                "viewport scale",
+            );
+        }
+    }
+
+    #[test]
+    fn corner_smoothing_sublogical_damage_survives_grouping() {
+        let handle = core::image::Handle::from_rgba(1, 1, vec![255; 4]);
+        for scale in [2.5, 4.0] {
+            let mut renderer = Renderer::new(renderer::Settings::default());
+            let viewport = viewport(scale);
+            let bounds = Rectangle::with_size(viewport.logical_size());
+            renderer.reset(bounds);
+            let tiny = Rectangle {
+                x: 30.125,
+                y: 40.125,
+                width: 0.1,
+                height: 0.1,
+            };
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: tiny,
+                    snap: false,
+                    ..Default::default()
+                },
+                Color::WHITE,
+            );
+            renderer.draw_image(
+                core::Image::new(handle.clone()).snap(false),
+                tiny + core::Vector::new(10.0, 0.0),
+                tiny + core::Vector::new(10.0, 0.0),
+            );
+            let mut pixels = tiny_skia::Pixmap::new(720, 720).unwrap();
+            let mut mask = tiny_skia::Mask::new(720, 720).unwrap();
+            renderer.draw(
+                &mut pixels.as_mut(),
+                &mut mask,
+                &viewport,
+                &[bounds],
+                Color::TRANSPARENT,
+            );
+            let previous = renderer.layers().to_vec();
+            renderer.reset(bounds);
+            compare_transition(
+                &mut renderer,
+                &mut pixels,
+                &mut mask,
+                &previous,
+                scale,
+                scale,
+                "remove sublogical primitives",
+            );
+        }
+    }
+
+    #[test]
+    fn corner_smoothing_layer_transforms_preserve_image_quad_coverage() {
+        let handle = core::image::Handle::from_rgba(1, 1, vec![255; 4]);
+        let radius = core::border::Radius {
+            top_left: 12.0,
+            top_right: 5.0,
+            bottom_right: 0.0,
+            bottom_left: 18.0,
+        };
+        let bounds = Rectangle {
+            x: 0.25,
+            y: 0.5,
+            width: 40.0,
+            height: 30.0,
+        };
+        for scale in [1.0, 2.5, 4.0] {
+            for snap in [false, true] {
+                let mut renderer = Renderer::new(renderer::Settings::default());
+                let viewport = viewport(scale);
+                let surface = Rectangle::with_size(viewport.logical_size());
+                let mut mask = tiny_skia::Mask::new(720, 720).unwrap();
+                let mut quad_pixels = tiny_skia::Pixmap::new(720, 720).unwrap();
+                let mut image_pixels = tiny_skia::Pixmap::new(720, 720).unwrap();
+                let transform = Transformation::translate(20.25, 18.5) * Transformation::scale(1.5);
+                renderer.reset(surface);
+                renderer.with_transformation(transform, |renderer| {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds,
+                            border: core::Border::default().rounded(radius).smoothing(0.6),
+                            snap,
+                            ..Default::default()
+                        },
+                        Color::WHITE,
+                    );
+                });
+                renderer.draw(
+                    &mut quad_pixels.as_mut(),
+                    &mut mask,
+                    &viewport,
+                    &[surface],
+                    Color::TRANSPARENT,
+                );
+                renderer.reset(surface);
+                renderer.with_transformation(transform, |renderer| {
+                    renderer.draw_image(
+                        core::Image::new(handle.clone())
+                            .border_radius(radius)
+                            .border_smoothing(0.6)
+                            .snap(snap),
+                        bounds,
+                        bounds,
+                    );
+                });
+                renderer.draw(
+                    &mut image_pixels.as_mut(),
+                    &mut mask,
+                    &viewport,
+                    &[surface],
+                    Color::TRANSPARENT,
+                );
+                for (quad, image) in quad_pixels.pixels().iter().zip(image_pixels.pixels()) {
+                    assert!(
+                        quad.alpha().abs_diff(image.alpha()) <= 1,
+                        "scale {scale}, snap {snap}: quad {} image {}",
+                        quad.alpha(),
+                        image.alpha()
+                    );
+                }
+            }
+        }
+    }
+}

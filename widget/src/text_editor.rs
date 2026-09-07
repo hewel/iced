@@ -825,6 +825,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         background: Background::Color(palette.background.base.color),
         border: Border {
             radius: 2.0.into(),
+            smoothing: 0.0,
             width: 1.0,
             color: palette.background.strong.color,
         },

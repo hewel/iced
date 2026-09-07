@@ -10,64 +10,53 @@ struct GradientVertexInput {
     @location(7) border_color: vec4<f32>,
     @location(8) border_radius: vec4<f32>,
     @location(9) border_width: f32,
-    @location(10) snap: u32,
+    @location(10) shadow_color: vec4<f32>,
+    @location(11) shadow_offset: vec2<f32>,
+    @location(12) shadow_blur_radius: f32,
+    @location(13) snap: u32,
+    @location(14) smoothing: f32,
 }
 
 struct GradientVertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(1) @interpolate(flat) colors_1: vec4<u32>,
-    @location(2) @interpolate(flat) colors_2: vec4<u32>,
-    @location(3) @interpolate(flat) colors_3: vec4<u32>,
-    @location(4) @interpolate(flat) colors_4: vec4<u32>,
-    @location(5) @interpolate(flat) offsets: vec4<u32>,
-    @location(6) direction: vec4<f32>,
-    @location(7) position_and_scale: vec4<f32>,
-    @location(8) border_color: vec4<f32>,
-    @location(9) border_radius: vec4<f32>,
-    @location(10) border_width: f32,
+    @location(0) @interpolate(flat) colors_1: vec4<u32>,
+    @location(1) @interpolate(flat) colors_2: vec4<u32>,
+    @location(2) @interpolate(flat) colors_3: vec4<u32>,
+    @location(3) @interpolate(flat) colors_4: vec4<u32>,
+    @location(4) @interpolate(flat) offsets: vec4<u32>,
+    @location(5) @interpolate(flat) direction: vec4<f32>,
+    @location(6) @interpolate(flat) position_and_scale: vec4<f32>,
+    @location(7) @interpolate(flat) border_color: vec4<f32>,
+    @location(8) @interpolate(flat) border_radius: vec4<f32>,
+    @location(9) @interpolate(flat) border_width: f32,
+    @location(10) @interpolate(flat) shadow_color: vec4<f32>,
+    @location(11) @interpolate(flat) shadow_and_smoothing: vec4<f32>,
 }
 
 @vertex
 fn gradient_vs_main(input: GradientVertexInput) -> GradientVertexOutput {
     var out: GradientVertexOutput;
 
-    var pos: vec2<f32> = input.position_and_scale.xy * globals.scale;
-    var scale: vec2<f32> = input.position_and_scale.zw * globals.scale;
-
-    var pos_snap = vec2<f32>(0.0, 0.0);
-    var scale_snap = vec2<f32>(0.0, 0.0);
-
-    if bool(input.snap) {
-        pos_snap = round(pos + vec2(0.001, 0.001)) - pos;
-        scale_snap = round(pos + scale + vec2(0.001, 0.001)) - pos - pos_snap - scale;
-    }
-
-    var min_border_radius = min(input.position_and_scale.z, input.position_and_scale.w) * 0.5;
-    var border_radius: vec4<f32> = vec4<f32>(
-        min(input.border_radius.x, min_border_radius),
-        min(input.border_radius.y, min_border_radius),
-        min(input.border_radius.z, min_border_radius),
-        min(input.border_radius.w, min_border_radius)
-    );
-
-    var transform: mat4x4<f32> = mat4x4<f32>(
-        vec4<f32>(scale.x + scale_snap.x + 1.0, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, scale.y + scale_snap.y + 1.0, 0.0, 0.0),
-        vec4<f32>(0.0, 0.0, 1.0, 0.0),
-        vec4<f32>(pos + pos_snap - vec2<f32>(0.5, 0.5), 0.0, 1.0)
-    );
-
-    out.position = globals.transform * transform * vec4<f32>(vertex_position(input.vertex_index), 0.0, 1.0);
+    let bounds = quad_bounds(input.position_and_scale, input.snap != 0u);
+    let cap = max(min(bounds.z, bounds.w) * 0.5, 0.0);
+    let offset = quad_shadow_offset(input.shadow_offset);
+    let blur = quad_shadow_blur(input.shadow_blur_radius);
+    out.position = quad_vertex(bounds, offset, blur, input.vertex_index);
     out.colors_1 = input.colors_1;
     out.colors_2 = input.colors_2;
     out.colors_3 = input.colors_3;
     out.colors_4 = input.colors_4;
     out.offsets = input.offsets;
     out.direction = input.direction * globals.scale;
-    out.position_and_scale = vec4<f32>(pos + pos_snap, scale + scale_snap);
+    out.position_and_scale = bounds;
     out.border_color = premultiply(input.border_color);
-    out.border_radius = border_radius * globals.scale;
-    out.border_width = input.border_width * globals.scale;
+    out.border_radius = min(input.border_radius, vec4(cap / globals.scale)) * globals.scale;
+    out.border_width = min(input.border_width, cap / globals.scale) * globals.scale;
+    if input.border_width >= cap / globals.scale {
+        out.border_width = cap;
+    }
+    out.shadow_color = premultiply(input.shadow_color);
+    out.shadow_and_smoothing = vec4(offset, blur, input.smoothing);
 
     return out;
 }
@@ -161,24 +150,8 @@ fn gradient_fs_main(input: GradientVertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    var mixed_color: vec4<f32> = gradient(input.position.xy, input.direction, colors, offsets, last_index);
-
-    let pos = input.position_and_scale.xy;
-    let scale = input.position_and_scale.zw;
-
-    var dist: f32 = rounded_box_sdf(
-        -(input.position.xy - pos - scale / 2.0) * 2.0,
-        scale,
-        input.border_radius * 2.0
-    ) / 2.0;
-
-    if (input.border_width > 0.0) {
-        mixed_color = mix(
-            mixed_color,
-            input.border_color,
-            clamp(0.5 + dist + input.border_width, 0.0, 1.0)
-        );
-    }
-
-    return mixed_color * clamp(0.5-dist, 0.0, 1.0);
+    let fill = gradient(input.position.xy, input.direction, colors, offsets, last_index);
+    return quad_color(input.position.xy, input.position_and_scale, input.border_radius,
+        input.shadow_and_smoothing.w, input.border_width, fill, input.border_color,
+        input.shadow_color, input.shadow_and_smoothing.xy, input.shadow_and_smoothing.z);
 }

@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Native corner smoothing for quad borders and raster image display frames in both `wgpu` and `tiny-skia`. `Border::smoothing` and `Image::border_smoothing` use a fixed-footprint superellipse; the default `0` retains circular corners, and `1` uses a quartic curve. This is not a Figma-equivalent parameter.
+- Explicit raster image source cropping and pixel snapping, with matching widget builders.
+- Interactive corner, thin-border, shadow, image crop/rotation, and window capture controls in `custom_quad`.
+
+### Fixed
+- Consistent distance-based quad and image antialiasing, constant-width inside borders, and saturated borders without residual center fill.
+- Gradient quad instance offsets and gradient shadows in the native GPU renderer.
+- Rotated fragmented image placement and atlas gutter sampling across source fragments.
+- Rounded raster images, transformed border dimensions, and snapped/rotated damage bounds in `tiny-skia`, without changing inherited clipping masks.
+
 ## [0.14.0] - 2025-12-07
 ### Added
 - Reactive rendering. [#2662](https://github.com/iced-rs/iced/pull/2662)

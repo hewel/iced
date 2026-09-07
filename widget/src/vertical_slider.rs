@@ -487,6 +487,7 @@ where
                 },
                 border: Border {
                     radius: handle_border_radius,
+                    smoothing: 0.0,
                     width: style.handle.border_width,
                     color: style.handle.border_color,
                 },

@@ -389,7 +389,15 @@ impl geometry::frame::Backend for Frame {
         let (bounds, external_rotation) = self.transforms.current.transform_rectangle(bounds);
 
         image.rotation += external_rotation;
-        image.border_radius = image.border_radius * self.transforms.current.scale().0;
+        let scale = self.transforms.current.scale().0;
+        let scale_radius =
+            |radius| crate::graphics::shape::normalize_length(radius).min(f32::MAX / scale) * scale;
+        image.border_radius = core::border::Radius {
+            top_left: scale_radius(image.border_radius.top_left),
+            top_right: scale_radius(image.border_radius.top_right),
+            bottom_right: scale_radius(image.border_radius.bottom_right),
+            bottom_left: scale_radius(image.border_radius.bottom_left),
+        };
 
         self.images.push(Image::Raster {
             image,

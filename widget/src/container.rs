@@ -555,6 +555,7 @@ pub fn bordered_box(theme: &Theme) -> Style {
         border: Border {
             width: 1.0,
             radius: 5.0.into(),
+            smoothing: 0.0,
             color: palette.background.weak.color,
         },
         ..Style::default()

@@ -1,6 +1,8 @@
 use crate::core::image as raster;
-use crate::core::{Rectangle, Size};
+use crate::core::{Point, Rectangle, Size};
+use crate::engine::{image_envelope, pixel_channels, pixel_roi, source_over};
 use crate::graphics;
+use crate::graphics::shape::{self, RoundedRectangle};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -35,42 +37,103 @@ impl Pipeline {
 
     pub fn draw(
         &mut self,
-        handle: &raster::Handle,
-        filter_method: raster::FilterMethod,
+        image: &raster::Image,
         bounds: Rectangle,
-        opacity: f32,
+        frame: &RoundedRectangle,
         pixels: &mut tiny_skia::PixmapMut<'_>,
-        transform: tiny_skia::Transform,
-        clip_mask: Option<&tiny_skia::Mask>,
+        clip_mask: &tiny_skia::Mask,
+        clip_bounds: Rectangle,
     ) {
         let mut cache = self.cache.borrow_mut();
 
-        let Ok(image) = cache.allocate(handle) else {
+        let Ok(source) = cache.allocate(&image.handle) else {
             return;
         };
-
-        let width_scale = bounds.width / image.width() as f32;
-        let height_scale = bounds.height / image.height() as f32;
-
-        let transform = transform.pre_scale(width_scale, height_scale);
-
-        let quality = match filter_method {
-            raster::FilterMethod::Linear => tiny_skia::FilterQuality::Bilinear,
-            raster::FilterMethod::Nearest => tiny_skia::FilterQuality::Nearest,
+        let Some(crop) =
+            raster::crop_bounds(Size::new(source.width(), source.height()), image.crop)
+        else {
+            return;
         };
-
-        pixels.draw_pixmap(
-            (bounds.x / width_scale) as i32,
-            (bounds.y / height_scale) as i32,
-            image,
-            &tiny_skia::PixmapPaint {
-                quality,
-                opacity,
-                ..Default::default()
-            },
-            transform,
-            clip_mask,
-        );
+        let rotation = f32::from(image.rotation);
+        let Some(envelope) = image_envelope(bounds, clip_bounds, rotation) else {
+            return;
+        };
+        let Some([left, top, right, bottom]) =
+            pixel_roi(envelope, clip_bounds, pixels.width(), pixels.height())
+        else {
+            return;
+        };
+        let Some(content) = RoundedRectangle::new(bounds, 0.0.into(), 0.0) else {
+            return;
+        };
+        let opacity = if image.opacity.is_nan() {
+            0.0
+        } else {
+            image.opacity.clamp(0.0, 1.0)
+        };
+        if opacity == 0.0 {
+            return;
+        }
+        let (sin, cos) = rotation.sin_cos();
+        let center = bounds.center();
+        let stride = pixels.width() as usize;
+        let sample = |x: i64, y: i64| {
+            let x = x.clamp(
+                i64::from(crop.x),
+                i64::from(crop.x) + i64::from(crop.width) - 1,
+            ) as usize;
+            let y = y.clamp(
+                i64::from(crop.y),
+                i64::from(crop.y) + i64::from(crop.height) - 1,
+            ) as usize;
+            pixel_channels(source.pixels()[y * source.width() as usize + x])
+        };
+        for y in top..bottom {
+            for x in left..right {
+                let index = y as usize * stride + x as usize;
+                let mask = f32::from(clip_mask.data()[index]) / 255.0;
+                if mask == 0.0 {
+                    continue;
+                }
+                let point = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                let delta = point - center;
+                let local = Point::new(
+                    center.x + cos * delta.x + sin * delta.y,
+                    center.y - sin * delta.x + cos * delta.y,
+                );
+                let coverage = shape::coverage(frame.distance(point).max(content.distance(local)))
+                    * opacity
+                    * mask;
+                if coverage == 0.0 {
+                    continue;
+                }
+                let u = crop.x as f32 + (local.x - bounds.x) / bounds.width * crop.width as f32;
+                let v = crop.y as f32 + (local.y - bounds.y) / bounds.height * crop.height as f32;
+                let color = match image.filter_method {
+                    raster::FilterMethod::Nearest => sample(u.floor() as i64, v.floor() as i64),
+                    raster::FilterMethod::Linear => {
+                        let u = u - 0.5;
+                        let v = v - 0.5;
+                        let x = u.floor() as i64;
+                        let y = v.floor() as i64;
+                        let tx = u - u.floor();
+                        let ty = v - v.floor();
+                        let a = sample(x, y);
+                        let b = sample(x + 1, y);
+                        let c = sample(x, y + 1);
+                        let d = sample(x + 1, y + 1);
+                        std::array::from_fn(|channel| {
+                            (a[channel] * (1.0 - tx) + b[channel] * tx) * (1.0 - ty)
+                                + (c[channel] * (1.0 - tx) + d[channel] * tx) * ty
+                        })
+                    }
+                };
+                source_over(
+                    &mut pixels.pixels_mut()[index],
+                    color.map(|channel| channel * coverage),
+                );
+            }
+        }
     }
 
     pub fn trim_cache(&mut self) {

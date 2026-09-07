@@ -26,6 +26,17 @@ pub struct Image<H = Handle> {
     /// Currently, this will only be applied to the `clip_bounds`.
     pub border_radius: border::Radius,
 
+    /// Display-frame corner smoothing in `[0, 1]`; zero uses circular corners.
+    pub border_smoothing: f32,
+
+    /// Whether the content and display frames snap to physical pixel boundaries.
+    pub snap: bool,
+
+    /// Selected source-pixel region, intersected with the actual image dimensions.
+    ///
+    /// The destination bounds describe this region, not the uncropped image.
+    pub crop: Option<Rectangle<u32>>,
+
     /// The opacity of the image.
     ///
     /// 0 means transparent. 1 means opaque.
@@ -33,6 +44,35 @@ pub struct Image<H = Handle> {
 }
 
 impl Image<Handle> {
+    /// Sets the radii of the unrotated display-frame corners.
+    pub fn border_radius(mut self, radius: impl Into<border::Radius>) -> Self {
+        self.border_radius = radius.into();
+        self
+    }
+
+    /// Sets display-frame corner smoothing; renderers clamp to `[0, 1]`.
+    ///
+    /// NaN is treated as zero. This is not a Figma-equivalent parameter.
+    pub fn border_smoothing(mut self, smoothing: f32) -> Self {
+        self.border_smoothing = smoothing;
+        self
+    }
+
+    /// Sets physical pixel snapping for the content and display frames.
+    pub fn snap(mut self, snap: bool) -> Self {
+        self.snap = snap;
+        self
+    }
+
+    /// Selects a source-pixel region before scaling and rotation.
+    ///
+    /// The request is retained and intersected with the actual source dimensions
+    /// when rendering. An empty intersection draws nothing.
+    pub fn crop(mut self, region: Rectangle<u32>) -> Self {
+        self.crop = Some(region);
+        self
+    }
+
     /// Creates a new [`Image`] with the given handle.
     pub fn new(handle: impl Into<Handle>) -> Self {
         Self {
@@ -40,6 +80,9 @@ impl Image<Handle> {
             filter_method: FilterMethod::default(),
             rotation: Radians(0.0),
             border_radius: border::Radius::default(),
+            border_smoothing: 0.0,
+            snap: crate::renderer::CRISP,
+            crop: None,
             opacity: 1.0,
         }
     }
@@ -66,6 +109,86 @@ impl Image<Handle> {
 impl From<&Handle> for Image {
     fn from(handle: &Handle) -> Self {
         Image::new(handle.clone())
+    }
+}
+
+/// Intersects a requested source region with the half-open image bounds.
+///
+/// Returns `None` for an empty source or intersection. Endpoints are evaluated
+/// in `u64`, so overflowing `u32` requests are safely clipped.
+pub fn crop_bounds(size: Size<u32>, crop: Option<Rectangle<u32>>) -> Option<Rectangle<u32>> {
+    let region = crop.unwrap_or(Rectangle {
+        x: 0,
+        y: 0,
+        width: size.width,
+        height: size.height,
+    });
+    let right = (u64::from(region.x) + u64::from(region.width)).min(u64::from(size.width));
+    let bottom = (u64::from(region.y) + u64::from(region.height)).min(u64::from(size.height));
+    let x = region.x.min(size.width);
+    let y = region.y.min(size.height);
+    let width = right as u32 - x;
+    let height = bottom as u32 - y;
+    (width > 0 && height > 0).then_some(Rectangle {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn source_crop_intersects_without_endpoint_overflow() {
+        assert_eq!(
+            crop_bounds(
+                Size::new(100, 80),
+                Some(Rectangle {
+                    x: 90,
+                    y: 70,
+                    width: u32::MAX,
+                    height: u32::MAX,
+                })
+            ),
+            Some(Rectangle {
+                x: 90,
+                y: 70,
+                width: 10,
+                height: 10
+            }),
+        );
+        for region in [
+            Rectangle {
+                x: 100,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            Rectangle {
+                x: u32::MAX,
+                y: 0,
+                width: u32::MAX,
+                height: 1,
+            },
+            Rectangle {
+                x: 0,
+                y: 80,
+                width: 1,
+                height: 1,
+            },
+            Rectangle {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+        ] {
+            assert_eq!(crop_bounds(Size::new(100, 80), Some(region)), None);
+        }
+        assert_eq!(crop_bounds(Size::new(0, 80), None), None);
     }
 }
 

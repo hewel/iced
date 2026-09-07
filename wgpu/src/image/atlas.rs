@@ -130,17 +130,21 @@ impl Atlas {
 
         match &entry {
             Entry::Contiguous(allocation) => {
-                self.upload_allocation(pixels, width, 0, allocation, encoder, belt);
+                self.upload_allocation(
+                    pixels,
+                    Size::new(width, height),
+                    (0, 0),
+                    allocation,
+                    encoder,
+                    belt,
+                );
             }
             Entry::Fragmented { fragments, .. } => {
                 for fragment in fragments {
-                    let (x, y) = fragment.position;
-                    let offset = 4 * (y * width + x) as usize;
-
                     self.upload_allocation(
                         pixels,
-                        width,
-                        offset,
+                        Size::new(width, height),
+                        fragment.position,
                         &fragment.allocation,
                         encoder,
                         belt,
@@ -208,11 +212,11 @@ impl Atlas {
             let mut y = 0;
 
             while y < height {
-                let height = std::cmp::min(height - y, self.size);
+                let height = std::cmp::min(height - y, self.size - 2);
                 let mut x = 0;
 
                 while x < width {
-                    let width = std::cmp::min(width - x, self.size);
+                    let width = std::cmp::min(width - x, self.size - 2);
 
                     let allocation = self.allocate(width, height)?;
 
@@ -305,8 +309,8 @@ impl Atlas {
     fn upload_allocation(
         &self,
         pixels: &[u8],
-        image_width: u32,
-        offset: usize,
+        image_size: Size<u32>,
+        source_origin: (u32, u32),
         allocation: &Allocation,
         encoder: &mut wgpu::CommandEncoder,
         belt: &mut wgpu::util::StagingBelt,
@@ -337,72 +341,35 @@ impl Atlas {
         let h = height as usize;
         let pad_w = padding.width as usize;
         let pad_h = padding.height as usize;
-        let stride = PIXEL * w;
 
-        // Copy image rows
-        for row in 0..h {
-            let src = offset + row * PIXEL * image_width as usize;
-            let dst = (row + pad_h) * bytes_per_row;
-
+        // Include neighboring source texels in every gutter, including its
+        // corners. Only the original image boundary repeats an edge texel.
+        for row in 0..h + 2 * pad_h {
+            let source_y = (i64::from(source_origin.1) + row as i64 - pad_h as i64)
+                .clamp(0, i64::from(image_size.height) - 1) as usize;
+            let source_row = source_y * image_size.width as usize * PIXEL;
+            let dst = row * bytes_per_row;
+            let source_x = source_origin.0 as usize;
+            let src = source_row + source_x * PIXEL;
             fragment
-                .slice(dst + PIXEL * pad_w..dst + PIXEL * pad_w + stride)
-                .copy_from_slice(&pixels[src..src + stride]);
-
-            // Add padding to the sides, if needed
-            for i in 0..pad_w {
+                .slice(dst + pad_w * PIXEL..dst + (pad_w + w) * PIXEL)
+                .copy_from_slice(&pixels[src..src + w * PIXEL]);
+            for column in 0..pad_w {
+                let left = (i64::from(source_origin.0) + column as i64 - pad_w as i64)
+                    .clamp(0, i64::from(image_size.width) - 1) as usize;
+                let right = (source_x + w + column).min(image_size.width as usize - 1);
                 fragment
-                    .slice(dst + PIXEL * i..dst + PIXEL * (i + 1))
-                    .copy_from_slice(&pixels[src..src + PIXEL]);
-
+                    .slice(dst + column * PIXEL..dst + (column + 1) * PIXEL)
+                    .copy_from_slice(
+                        &pixels[source_row + left * PIXEL..source_row + (left + 1) * PIXEL],
+                    );
                 fragment
                     .slice(
-                        dst + stride + PIXEL * (pad_w + i)..dst + stride + PIXEL * (pad_w + i + 1),
+                        dst + (pad_w + w + column) * PIXEL..dst + (pad_w + w + column + 1) * PIXEL,
                     )
-                    .copy_from_slice(&pixels[src + stride - PIXEL..src + stride]);
-            }
-        }
-
-        // Add padding on top and bottom
-        for row in 0..pad_h {
-            let dst_top = row * bytes_per_row;
-            let dst_bottom = (pad_h + h + row) * bytes_per_row;
-            let src_top = offset;
-            let src_bottom = offset + (h - 1) * PIXEL * image_width as usize;
-
-            // Top
-            fragment
-                .slice(dst_top + PIXEL * pad_w..dst_top + PIXEL * (pad_w + w))
-                .copy_from_slice(&pixels[src_top..src_top + PIXEL * w]);
-
-            // Bottom
-            fragment
-                .slice(dst_bottom + PIXEL * pad_w..dst_bottom + PIXEL * (pad_w + w))
-                .copy_from_slice(&pixels[src_bottom..src_bottom + PIXEL * w]);
-
-            // Corners
-            for i in 0..pad_w {
-                // Top left
-                fragment
-                    .slice(dst_top + PIXEL * i..dst_top + PIXEL * (i + 1))
-                    .copy_from_slice(&pixels[offset..offset + PIXEL]);
-
-                // Top right
-                fragment
-                    .slice(dst_top + PIXEL * (w + pad_w + i)..dst_top + PIXEL * (w + pad_w + i + 1))
-                    .copy_from_slice(&pixels[offset + PIXEL * (w - 1)..offset + PIXEL * w]);
-
-                // Bottom left
-                fragment
-                    .slice(dst_bottom + PIXEL * i..dst_bottom + PIXEL * (i + 1))
-                    .copy_from_slice(&pixels[src_bottom..src_bottom + PIXEL]);
-
-                // Bottom right
-                fragment
-                    .slice(
-                        dst_bottom + PIXEL * (w + pad_w + i)
-                            ..dst_bottom + PIXEL * (w + pad_w + i + 1),
-                    )
-                    .copy_from_slice(&pixels[src_bottom + PIXEL * (w - 1)..src_bottom + PIXEL * w]);
+                    .copy_from_slice(
+                        &pixels[source_row + right * PIXEL..source_row + (right + 1) * PIXEL],
+                    );
             }
         }
 

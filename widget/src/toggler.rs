@@ -425,6 +425,7 @@ where
                 bounds,
                 border: Border {
                     radius: border_radius,
+                    smoothing: 0.0,
                     width: style.background_border_width,
                     color: style.background_border_color,
                 },
@@ -461,6 +462,7 @@ where
                 bounds: toggle_bounds,
                 border: Border {
                     radius: border_radius,
+                    smoothing: 0.0,
                     width: style.foreground_border_width,
                     color: style.foreground_border_color,
                 },

@@ -19,6 +19,7 @@ pub mod gradient;
 pub mod image;
 pub mod layer;
 pub mod mesh;
+pub mod shape;
 pub mod shell;
 pub mod text;
 

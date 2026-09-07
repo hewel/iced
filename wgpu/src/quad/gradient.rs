@@ -6,7 +6,7 @@ use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 
 /// A quad filled with interpolated colors.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
 pub struct Gradient {
     /// The background gradient data of the quad.
@@ -16,11 +16,14 @@ pub struct Gradient {
     pub quad: Quad,
 }
 
-#[allow(unsafe_code)]
-unsafe impl Pod for Gradient {}
-
-#[allow(unsafe_code)]
-unsafe impl Zeroable for Gradient {}
+const _: () = {
+    assert!(std::mem::size_of::<Gradient>() == 184);
+    assert!(std::mem::align_of::<Gradient>() == 4);
+    assert!(std::mem::size_of::<gradient::Packed>() == 96);
+    assert!(std::mem::offset_of!(Gradient, quad) == 96);
+    assert!(std::mem::offset_of!(Gradient, quad) + std::mem::offset_of!(Quad, snap) == 176);
+    assert!(std::mem::offset_of!(Gradient, quad) + std::mem::offset_of!(Quad, smoothing) == 180);
+};
 
 #[derive(Debug)]
 pub struct Layer {
@@ -81,6 +84,8 @@ impl Pipeline {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("iced_wgpu.quad.gradient.shader"),
                 source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(concat!(
+                    include_str!("../shader/shape.wgsl"),
+                    "\n",
                     include_str!("../shader/quad.wgsl"),
                     "\n",
                     include_str!("../shader/vertex.wgsl"),
@@ -102,30 +107,101 @@ impl Pipeline {
                     buffers: &[wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Gradient>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array!(
-                            // Colors 1-2
-                            0 => Uint32x4,
-                            // Colors 3-4
-                            1 => Uint32x4,
-                            // Colors 5-6
-                            2 => Uint32x4,
-                            // Colors 7-8
-                            3 => Uint32x4,
-                            // Offsets 1-8
-                            4 => Uint32x4,
-                            // Direction
-                            5 => Float32x4,
-                            // Position & Scale
-                            6 => Float32x4,
-                            // Border color
-                            7 => Float32x4,
-                            // Border radius
-                            8 => Float32x4,
-                            // Border width
-                            9 => Float32,
-                            // Snap
-                            10 => Uint32,
-                        ),
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x4,
+                                offset: std::mem::offset_of!(Gradient, gradient) as u64,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x4,
+                                offset: (std::mem::offset_of!(Gradient, gradient) + 16) as u64,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x4,
+                                offset: (std::mem::offset_of!(Gradient, gradient) + 32) as u64,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x4,
+                                offset: (std::mem::offset_of!(Gradient, gradient) + 48) as u64,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x4,
+                                offset: (std::mem::offset_of!(Gradient, gradient) + 64) as u64,
+                                shader_location: 4,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: (std::mem::offset_of!(Gradient, gradient) + 80) as u64,
+                                shader_location: 5,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, position))
+                                    as u64,
+                                shader_location: 6,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, border_color))
+                                    as u64,
+                                shader_location: 7,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, border_radius))
+                                    as u64,
+                                shader_location: 8,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, border_width))
+                                    as u64,
+                                shader_location: 9,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, shadow_color))
+                                    as u64,
+                                shader_location: 10,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, shadow_offset))
+                                    as u64,
+                                shader_location: 11,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, shadow_blur_radius))
+                                    as u64,
+                                shader_location: 12,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, snap))
+                                    as u64,
+                                shader_location: 13,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: (std::mem::offset_of!(Gradient, quad)
+                                    + std::mem::offset_of!(Quad, smoothing))
+                                    as u64,
+                                shader_location: 14,
+                            },
+                        ],
                     }],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },

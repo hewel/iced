@@ -44,7 +44,25 @@ pub struct Quad {
 
     /// Whether the [`Quad`] should be snapped to the pixel grid.
     pub snap: u32,
+
+    /// The normalized corner smoothing of the [`Quad`].
+    pub smoothing: f32,
 }
+
+const _: () = {
+    assert!(mem::size_of::<Quad>() == 88);
+    assert!(mem::align_of::<Quad>() == 4);
+    assert!(mem::offset_of!(Quad, position) == 0);
+    assert!(mem::offset_of!(Quad, size) == 8);
+    assert!(mem::offset_of!(Quad, border_color) == 16);
+    assert!(mem::offset_of!(Quad, border_radius) == 32);
+    assert!(mem::offset_of!(Quad, border_width) == 48);
+    assert!(mem::offset_of!(Quad, shadow_color) == 52);
+    assert!(mem::offset_of!(Quad, shadow_offset) == 68);
+    assert!(mem::offset_of!(Quad, shadow_blur_radius) == 76);
+    assert!(mem::offset_of!(Quad, snap) == 80);
+    assert!(mem::offset_of!(Quad, smoothing) == 84);
+};
 
 #[derive(Debug, Clone)]
 pub struct Pipeline {

@@ -27,6 +27,11 @@ impl Layer {
         transformation: Transformation,
     ) {
         quad.bounds = quad.bounds * transformation;
+        let scale = transformation.scale_factor();
+        quad.border.radius = crate::engine::scaled_radius(quad.border.radius, scale);
+        quad.border.width = crate::engine::scaled_length(quad.border.width, scale);
+        quad.shadow.offset = crate::engine::shadow_offset(quad.shadow.offset, scale);
+        quad.shadow.blur_radius = crate::engine::shadow_blur(quad.shadow.blur_radius, scale);
         self.quads.push((quad, background));
     }
 
@@ -151,7 +156,10 @@ impl Layer {
     ) {
         let image = Image::Raster {
             image: core::Image {
-                border_radius: image.border_radius * transformation.scale_factor(),
+                border_radius: crate::engine::scaled_radius(
+                    image.border_radius,
+                    transformation.scale_factor(),
+                ),
                 ..image
             },
             bounds: bounds * transformation,
@@ -203,29 +211,36 @@ impl Layer {
         ));
     }
 
-    pub fn damage(previous: &Self, current: &Self) -> Vec<Rectangle> {
+    pub fn damage(previous: &Self, current: &Self, scale_factor: f32) -> Vec<Rectangle> {
         if previous.bounds != current.bounds {
             return vec![previous.bounds, current.bounds];
         }
 
-        let layer_bounds = current.bounds.expand(1.0);
+        let layer_bounds = current.bounds * scale_factor;
+        let physical_damage = |bounds: Rectangle| {
+            bounds
+                .intersection(&layer_bounds)
+                .map(|bounds| {
+                    let x = bounds.x.floor();
+                    let y = bounds.y.floor();
+                    Rectangle {
+                        x: x / scale_factor,
+                        y: y / scale_factor,
+                        width: (((bounds.x + bounds.width).ceil() - x) / scale_factor).max(1.0),
+                        height: (((bounds.y + bounds.height).ceil() - y) / scale_factor).max(1.0),
+                    }
+                })
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
 
         let mut damage = damage::list(
             &previous.quads,
             &current.quads,
             |(quad, _)| {
-                let Some(bounds) = quad.bounds.expand(1.0).intersection(&layer_bounds) else {
-                    return vec![];
-                };
-
-                vec![if quad.shadow.color.a > 0.0 {
-                    bounds.expand(
-                        quad.shadow.offset.x.abs().max(quad.shadow.offset.y.abs())
-                            + quad.shadow.blur_radius,
-                    )
-                } else {
-                    bounds
-                }]
+                crate::engine::quad_envelope(quad, Transformation::scale(scale_factor))
+                    .map(&physical_damage)
+                    .unwrap_or_default()
             },
             |(quad_a, background_a), (quad_b, background_b)| {
                 quad_a == quad_b && background_a == background_b
@@ -289,7 +304,21 @@ impl Layer {
         let images = damage::list(
             &previous.images,
             &current.images,
-            |image| vec![image.bounds().expand(1.0)],
+            |image| {
+                let envelope = match image {
+                    Image::Raster {
+                        image,
+                        bounds,
+                        clip_bounds,
+                    } => {
+                        let bounds = graphics::shape::snap(*bounds * scale_factor, image.snap);
+                        let frame = graphics::shape::snap(*clip_bounds * scale_factor, image.snap);
+                        crate::engine::image_envelope(bounds, frame, f32::from(image.rotation))
+                    }
+                    Image::Vector { .. } => Some(image.bounds().expand(1.0) * scale_factor),
+                };
+                envelope.map(&physical_damage).unwrap_or_default()
+            },
             Image::eq,
         );
 

@@ -10,93 +10,44 @@ struct SolidVertexInput {
     @location(7) shadow_offset: vec2<f32>,
     @location(8) shadow_blur_radius: f32,
     @location(9) snap: u32,
+    @location(10) smoothing: f32,
 }
 
 struct SolidVertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) border_color: vec4<f32>,
-    @location(2) pos: vec2<f32>,
-    @location(3) scale: vec2<f32>,
-    @location(4) border_radius: vec4<f32>,
-    @location(5) border_width: f32,
-    @location(6) shadow_color: vec4<f32>,
-    @location(7) shadow_offset: vec2<f32>,
-    @location(8) shadow_blur_radius: f32,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+    @location(1) @interpolate(flat) border_color: vec4<f32>,
+    @location(2) @interpolate(flat) bounds: vec4<f32>,
+    @location(3) @interpolate(flat) border_radius: vec4<f32>,
+    @location(4) @interpolate(flat) border_width: f32,
+    @location(5) @interpolate(flat) shadow_color: vec4<f32>,
+    @location(6) @interpolate(flat) shadow_and_smoothing: vec4<f32>,
 }
 
 @vertex
 fn solid_vs_main(input: SolidVertexInput) -> SolidVertexOutput {
     var out: SolidVertexOutput;
-
-    var pos: vec2<f32> = (input.pos + min(input.shadow_offset, vec2<f32>(0.0, 0.0)) - input.shadow_blur_radius) * globals.scale;
-    var scale: vec2<f32> = (input.scale + vec2<f32>(abs(input.shadow_offset.x), abs(input.shadow_offset.y)) + input.shadow_blur_radius * 2.0) * globals.scale;
-
-    var pos_snap = vec2<f32>(0.0, 0.0);
-    var scale_snap = vec2<f32>(0.0, 0.0);
-
-    if bool(input.snap) {
-        pos_snap = round(pos + vec2(0.001, 0.001)) - pos;
-        scale_snap = round(pos + scale + vec2(0.001, 0.001)) - pos - pos_snap - scale;
-    }
-
-    let border_radius = min(input.border_radius, vec4(min(input.scale.x, input.scale.y) / 2.0));
-
-    var transform: mat4x4<f32> = mat4x4<f32>(
-        vec4<f32>(scale.x + scale_snap.x + 1.0, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, scale.y + scale_snap.y + 1.0, 0.0, 0.0),
-        vec4<f32>(0.0, 0.0, 1.0, 0.0),
-        vec4<f32>(pos + pos_snap - vec2<f32>(0.5, 0.5), 0.0, 1.0)
-    );
-
-    out.position = globals.transform * transform * vec4<f32>(vertex_position(input.vertex_index), 0.0, 1.0);
+    let bounds = quad_bounds(vec4(input.pos, input.scale), input.snap != 0u);
+    let cap = max(min(bounds.z, bounds.w) * 0.5, 0.0);
+    let offset = quad_shadow_offset(input.shadow_offset);
+    let blur = quad_shadow_blur(input.shadow_blur_radius);
+    out.position = quad_vertex(bounds, offset, blur, input.vertex_index);
     out.color = premultiply(input.color);
     out.border_color = premultiply(input.border_color);
-    out.pos = input.pos * globals.scale + pos_snap;
-    out.scale = input.scale * globals.scale + scale_snap;
-    out.border_radius = border_radius * globals.scale;
-    out.border_width = input.border_width * globals.scale;
+    out.bounds = bounds;
+    out.border_radius = min(input.border_radius, vec4(cap / globals.scale)) * globals.scale;
+    out.border_width = min(input.border_width, cap / globals.scale) * globals.scale;
+    if input.border_width >= cap / globals.scale {
+        out.border_width = cap;
+    }
     out.shadow_color = premultiply(input.shadow_color);
-    out.shadow_offset = input.shadow_offset * globals.scale;
-    out.shadow_blur_radius = input.shadow_blur_radius * globals.scale;
-
+    out.shadow_and_smoothing = vec4(offset, blur, input.smoothing);
     return out;
 }
 
 @fragment
-fn solid_fs_main(
-    input: SolidVertexOutput
-) -> @location(0) vec4<f32> {
-    var mixed_color: vec4<f32> = input.color;
-
-    var dist = rounded_box_sdf(
-        -(input.position.xy - input.pos - input.scale * 0.5) * 2.0,
-        input.scale,
-        input.border_radius * 2.0
-    ) / 2.0;
-
-    if (input.border_width > 0.0) {
-        mixed_color = mix(
-            input.color,
-            input.border_color,
-            clamp(0.5 + dist + input.border_width, 0.0, 1.0)
-        );
-    }
-
-    var quad_alpha: f32 = clamp(0.5-dist, 0.0, 1.0);
-
-    let quad_color = mixed_color * quad_alpha;
-
-    if input.shadow_color.a > 0.0 {
-        var shadow_dist: f32 = rounded_box_sdf(
-            -(input.position.xy - input.pos - input.shadow_offset - input.scale/2.0) * 2.0,
-            input.scale,
-            input.border_radius * 2.0
-        ) / 2.0;
-        let shadow_alpha = 1.0 - smoothstep(-input.shadow_blur_radius, input.shadow_blur_radius, max(shadow_dist, 0.0));
-
-        return mix(quad_color, input.shadow_color, (1.0 - quad_alpha) * shadow_alpha);
-    } else {
-        return quad_color;
-    }
+fn solid_fs_main(input: SolidVertexOutput) -> @location(0) vec4<f32> {
+    return quad_color(input.position.xy, input.bounds, input.border_radius,
+        input.shadow_and_smoothing.w, input.border_width, input.color, input.border_color,
+        input.shadow_color, input.shadow_and_smoothing.xy, input.shadow_and_smoothing.z);
 }

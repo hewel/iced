@@ -538,7 +538,8 @@ where
                             width: bounds.width - style.border.width * 2.0,
                             ..bounds
                         },
-                        border: border::rounded(style.border.radius),
+                        border: border::rounded(style.border.radius)
+                            .smoothing(style.border.smoothing),
                         ..renderer::Quad::default()
                     },
                     style.selected_background,
@@ -643,6 +644,7 @@ pub fn default(theme: &Theme) -> Style {
         border: Border {
             width: 1.0,
             radius: 0.0.into(),
+            smoothing: 0.0,
             color: palette.background.strong.color,
         },
         text_color: palette.background.weak.text,

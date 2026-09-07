@@ -23,6 +23,7 @@ pub struct Surface {
 #[derive(Clone)]
 struct Frame {
     background: Color,
+    scale_factor: f32,
     layers: Vec<Layer>,
 }
 
@@ -159,14 +160,16 @@ pub fn present(
 
     let damage = last_frame
         .and_then(|last_frame| {
-            (last_frame.background == background).then(|| {
-                damage::diff(
-                    &last_frame.layers,
-                    renderer.layers(),
-                    |layer| vec![layer.bounds],
-                    Layer::damage,
-                )
-            })
+            (last_frame.background == background)
+                .then(|| {
+                    frame_damage(
+                        &last_frame.layers,
+                        renderer.layers(),
+                        last_frame.scale_factor,
+                        viewport.scale_factor(),
+                    )
+                })
+                .flatten()
         })
         .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
 
@@ -177,6 +180,7 @@ pub fn present(
     } else {
         surface.frames.push_front(Frame {
             background,
+            scale_factor: viewport.scale_factor(),
             layers: renderer.layers().to_vec(),
         });
 
@@ -199,7 +203,23 @@ pub fn present(
     }
 
     on_pre_present();
+
     buffer.present().map_err(|_| compositor::SurfaceError::Lost)
+}
+pub(crate) fn frame_damage(
+    previous: &[Layer],
+    current: &[Layer],
+    previous_scale: f32,
+    scale: f32,
+) -> Option<Vec<Rectangle>> {
+    (previous_scale == scale).then(|| {
+        damage::diff(
+            previous,
+            current,
+            |layer| vec![layer.bounds],
+            |previous, current| Layer::damage(previous, current, scale),
+        )
+    })
 }
 
 pub fn screenshot(

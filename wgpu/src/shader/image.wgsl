@@ -8,112 +8,98 @@ struct Globals {
 
 struct VertexInput {
     @builtin(vertex_index) vertex_index: u32,
-    @location(0) center: vec2<f32>,
+    @location(0) bounds: vec4<f32>,
     @location(1) clip_bounds: vec4<f32>,
     @location(2) border_radius: vec4<f32>,
     @location(3) tile: vec4<f32>,
-    @location(4) rotation: f32,
-    @location(5) opacity: f32,
-    @location(6) atlas_pos: vec2<f32>,
-    @location(7) atlas_scale: vec2<f32>,
-    @location(8) layer: i32,
+    @location(4) atlas: vec4<f32>,
+    @location(5) rotation: f32,
+    @location(6) opacity: f32,
+    @location(7) smoothing: f32,
+    @location(8) layer: u32,
+    @location(9) edges: u32,
 }
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) @interpolate(flat) clip_bounds: vec4<f32>,
-    @location(1) @interpolate(flat) border_radius: vec4<f32>,
-    @location(2) @interpolate(flat) atlas: vec4<f32>,
-    @location(3) @interpolate(flat) layer: i32,
-    @location(4) @interpolate(flat) opacity: f32,
-    @location(5) uv: vec2<f32>,
+    @location(0) @interpolate(flat) bounds: vec4<f32>,
+    @location(1) @interpolate(flat) clip_bounds: vec4<f32>,
+    @location(2) @interpolate(flat) border_radius: vec4<f32>,
+    @location(3) @interpolate(flat) tile: vec4<f32>,
+    @location(4) @interpolate(flat) atlas: vec4<f32>,
+    @location(5) @interpolate(flat) rotation: vec2<f32>,
+    @location(6) @interpolate(flat) opacity: f32,
+    @location(7) @interpolate(flat) smoothing: f32,
+    @location(8) @interpolate(flat) layer: u32,
+    @location(9) @interpolate(flat) edges: u32,
+}
+
+fn image_rotate(p: vec2<f32>, rotation: vec2<f32>) -> vec2<f32> {
+    return vec2(p.x * rotation.x - p.y * rotation.y, p.x * rotation.y + p.y * rotation.x);
 }
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-
-    // Generate a vertex position in the range [0, 1] from the vertex index
-    let corner = vertex_position(input.vertex_index);
-
-    let tile = input.tile;
-    let center = input.center;
-
-    // List the unrotated tile corners
-    let corners = array<vec2<f32>, 4>(
-        tile.xy,                              // Top left
-        tile.xy + vec2<f32>(tile.z, 0.0),     // Top right
-        tile.xy + vec2<f32>(0.0, tile.w),     // Bottom left
-        tile.xy + tile.zw                     // Bottom right
-    );
-
-    // Rotate tile corners around center
-    let cos_r = cos(-input.rotation); // Clockwise
-    let sin_r = sin(-input.rotation);
-    var rotated = array<vec2<f32>, 4>();
-
-    for (var i = 0u; i < 4u; i++) {
-        let c = corners[i] - input.center;
-        rotated[i] = vec2<f32>(c.x * cos_r - c.y * sin_r, c.x * sin_r + c.y * cos_r) + input.center;
-    }
-
-    // Find bounding box of rotated tile
-    var min_xy = rotated[0];
-    var max_xy = rotated[0];
+    let rotation = vec2(cos(input.rotation), sin(input.rotation));
+    let center = input.bounds.xy + input.bounds.zw * 0.5;
+    // Only content exterior edges acquire a guard. Internal seams partition
+    // one image; they have neither their own shape nor their own AA ramp.
+    let guard_min = vec2(select(0.0, 0.5, (input.edges & 1u) != 0u), select(0.0, 0.5, (input.edges & 2u) != 0u));
+    let guard_max = vec2(select(0.0, 0.5, (input.edges & 4u) != 0u), select(0.0, 0.5, (input.edges & 8u) != 0u));
+    let tile_min = input.tile.xy - guard_min;
+    let tile_max = input.tile.xy + input.tile.zw + guard_max;
+    let corners = array<vec2<f32>, 4>(tile_min, vec2(tile_max.x, tile_min.y), vec2(tile_min.x, tile_max.y), tile_max);
+    var low = image_rotate(corners[0] - center, rotation) + center;
+    var high = low;
     for (var i = 1u; i < 4u; i++) {
-        min_xy = min(min_xy, rotated[i]);
-        max_xy = max(max_xy, rotated[i]);
+        let p = image_rotate(corners[i] - center, rotation) + center;
+        low = min(low, p);
+        high = max(high, p);
     }
-    let rotated_bounds = vec4<f32>(min_xy, max_xy - min_xy);
-
-    // Intersect with clip bounds
-    let clip_min = max(rotated_bounds.xy, input.clip_bounds.xy);
-    let clip_max = min(rotated_bounds.xy + rotated_bounds.zw, input.clip_bounds.xy + input.clip_bounds.zw);
-    let clipped_tile = vec4<f32>(clip_min, max(vec2<f32>(0.0), clip_max - clip_min));
-
-    // Calculate the vertex position
-    let v_pos = clipped_tile.xy + corner * clipped_tile.zw;
-    out.position = vec4<f32>(v_pos, 0.0, 1.0);
+    low = max(low, input.clip_bounds.xy - vec2(0.5));
+    high = min(high, input.clip_bounds.xy + input.clip_bounds.zw + vec2(0.5));
+    let p = low + vertex_position(input.vertex_index) * max(high - low, vec2(0.0));
+    out.position = globals.transform * vec4(p, 0.0, 1.0);
+    out.bounds = input.bounds;
     out.clip_bounds = input.clip_bounds;
-
-    // Calculate rotated UV
-    let uv = input.atlas_pos + (v_pos - tile.xy) / tile.zw * input.atlas_scale;
-    let uv_center = input.atlas_pos + input.atlas_scale / 2.0;
-
-    let d = uv - uv_center;
-    out.uv = vec2<f32>(d.x * cos_r - d.y * sin_r, d.x * sin_r + d.y * cos_r) + uv_center;
-
-    out.position = globals.transform * out.position;
-    out.border_radius = min(input.border_radius, vec4(min(input.clip_bounds.z, input.clip_bounds.w) / 2.0));
-    out.atlas = vec4(input.atlas_pos, input.atlas_pos + input.atlas_scale);
-    out.layer = input.layer;
+    out.border_radius = input.border_radius;
+    out.tile = input.tile;
+    out.atlas = input.atlas;
+    out.rotation = rotation;
     out.opacity = input.opacity;
-
+    out.smoothing = input.smoothing;
+    out.layer = input.layer;
+    out.edges = input.edges;
     return out;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let fragment = input.position.xy;
-    let position = input.clip_bounds.xy;
-    let scale = input.clip_bounds.zw;
-
-    let d = rounded_box_sdf(
-        2.0 * (fragment - position - scale / 2.0),
-        scale,
-        input.border_radius * 2.0,
-    ) / 2.0;
-
-    let antialias: f32 = clamp(1.0 - d, 0.0, 1.0);
-    let inside = all(input.uv >= input.atlas.xy) && all(input.uv <= input.atlas.zw);
-
-    let sample = textureSample(u_texture, u_sampler, input.uv, input.layer) * vec4<f32>(1.0, 1.0, 1.0, antialias * input.opacity * f32(inside));
-    return premultiply(sample);
-}
-
-fn rounded_box_sdf(p: vec2<f32>, size: vec2<f32>, corners: vec4<f32>) -> f32 {
-    let box_half = select(corners.yz, corners.xw, p.x > 0.0);
-    let corner = select(box_half.y, box_half.x, p.y > 0.0);
-    let q = abs(p) - size + corner;
-    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - corner;
+    let center = input.bounds.xy + input.bounds.zw * 0.5;
+    let p = image_rotate(fragment - center, vec2(input.rotation.x, -input.rotation.y)) + center;
+    let tile_max = input.tile.xy + input.tile.zw;
+    // Half-open ownership prevents overlapping rotated tile AABBs from
+    // compositing a source pixel twice. Exterior guards belong to edge tiles.
+    if ((input.edges & 1u) == 0u && p.x < input.tile.x)
+        || ((input.edges & 2u) == 0u && p.y < input.tile.y)
+        || ((input.edges & 4u) == 0u && p.x >= tile_max.x)
+        || ((input.edges & 8u) == 0u && p.y >= tile_max.y) {
+        discard;
+    }
+    let d_frame = shape_distance(fragment, input.clip_bounds, input.border_radius, input.smoothing);
+    let q = abs(p - center) - input.bounds.zw * 0.5;
+    let d_content = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+    let coverage = shape_coverage(max(d_frame, d_content));
+    var uv = input.atlas.xy + (p - input.tile.xy) / input.tile.zw * input.atlas.zw;
+    let half_texel = vec2(0.5) / vec2<f32>(textureDimensions(u_texture));
+    // Clamp only at the selected crop boundary; internal seams sample the
+    // adjacent-source gutters rather than repeating the fragment's edge.
+    if (input.edges & 1u) != 0u { uv.x = max(uv.x, input.atlas.x + half_texel.x); }
+    if (input.edges & 2u) != 0u { uv.y = max(uv.y, input.atlas.y + half_texel.y); }
+    if (input.edges & 4u) != 0u { uv.x = min(uv.x, input.atlas.x + input.atlas.z - half_texel.x); }
+    if (input.edges & 8u) != 0u { uv.y = min(uv.y, input.atlas.y + input.atlas.w - half_texel.y); }
+    let sample = textureSampleLevel(u_texture, u_sampler, uv, i32(input.layer), 0.0);
+    return premultiply(sample * vec4(1.0, 1.0, 1.0, coverage * input.opacity));
 }

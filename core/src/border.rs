@@ -12,6 +12,12 @@ pub struct Border {
 
     /// The [`Radius`] of the border.
     pub radius: Radius,
+
+    /// Corner smoothing in `[0, 1]`; zero uses circular corners.
+    ///
+    /// Positive values use a superellipse within the same corner footprint.
+    /// This parameter is not equivalent to Figma corner smoothing.
+    pub smoothing: f32,
 }
 
 /// Creates a new [`Border`] with the given [`Radius`].
@@ -50,6 +56,13 @@ pub fn width(width: impl Into<Pixels>) -> Border {
 }
 
 impl Border {
+    /// Sets corner smoothing. Renderers clamp this value to `[0, 1]`.
+    ///
+    /// NaN is treated as zero. Use zero for strict circles and capsules.
+    pub fn smoothing(self, smoothing: f32) -> Self {
+        Self { smoothing, ..self }
+    }
+
     /// Sets the [`Color`] of the [`Border`].
     pub fn color(self, color: impl Into<Color>) -> Self {
         Self {

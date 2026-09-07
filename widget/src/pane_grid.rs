@@ -1285,6 +1285,7 @@ pub fn default(theme: &Theme) -> Style {
                 width: 2.0,
                 color: palette.primary.strong.color,
                 radius: 0.0.into(),
+                smoothing: 0.0,
             },
         },
         hovered_split: Line {
