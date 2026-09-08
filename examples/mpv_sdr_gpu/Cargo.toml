@@ -1,0 +1,22 @@
+[package]
+name = "mpv_sdr_gpu"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+iced_winit.workspace = true
+iced_winit.features = ["x11", "wayland"]
+iced_wgpu.workspace = true
+iced_wgpu.features = ["web-colors"]
+iced_widget.workspace = true
+iced_widget.features = ["wgpu"]
+futures.workspace = true
+futures.features = ["executor"]
+ash = "0.38"
+libloading = "0.8"
+parking_lot = "0.12"
+wgpu.workspace = true
+wgpu.features = ["vulkan"]
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive"] }
