@@ -263,6 +263,7 @@ where
                         .map(overlay::Nested::new);
 
                     if maybe_overlay.is_none() {
+                        event_statuses.resize(events.len(), event::Status::Ignored);
                         break;
                     }
 
@@ -300,13 +301,15 @@ where
                 (cursor, mouse::Interaction::None)
             };
 
-            self.overlay = Some(Overlay {
+            self.overlay = maybe_overlay.as_ref().map(|_| Overlay {
                 layout,
                 interaction,
             });
 
             (base_cursor, event_statuses, interaction)
         } else {
+            self.overlay = None;
+
             (
                 cursor,
                 vec![event::Status::Ignored; events.len()],
