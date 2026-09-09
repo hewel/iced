@@ -181,6 +181,9 @@ If you want to contribute, please read our [contributing guidelines] for more de
 Feedback is also welcome! You can create a new topic in [our Zulip forum] or
 come chat to [our Discord server].
 
+For this product fork's upstream synchronization, local extension contracts, and
+application acceptance/rollback policy, see [Fork maintenance](FORK_MAINTENANCE.md).
+
 ## Sponsors
 
 The development of Iced is sponsored by the [Cryptowatch] team at [Kraken.com]
