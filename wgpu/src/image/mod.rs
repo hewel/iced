@@ -166,13 +166,20 @@ impl Pipeline {
         }
     }
 
-    pub fn create_cache(&self, device: &wgpu::Device, queue: &wgpu::Queue, shell: &Shell) -> Cache {
+    pub fn create_cache(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shell: &Shell,
+        queue_synchronization: Option<std::sync::Arc<dyn crate::QueueSynchronization>>,
+    ) -> Cache {
         Cache::new(
             device,
             queue,
             self.backend,
             self.texture_layout.clone(),
             shell,
+            queue_synchronization,
         )
     }
 }

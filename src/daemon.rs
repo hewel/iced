@@ -26,7 +26,7 @@ pub fn daemon<State, Message, Theme, Renderer>(
     boot: impl application::BootFn<State, Message>,
     update: impl application::UpdateFn<State, Message>,
     view: impl for<'a> ViewFn<'a, State, Message, Theme, Renderer>,
-) -> Daemon<impl Program<State = State, Message = Message, Theme = Theme>>
+) -> Daemon<impl Program<State = State, Message = Message, Theme = Theme, Renderer = Renderer>>
 where
     State: 'static,
     Message: Send + 'static,
@@ -128,6 +128,37 @@ impl<P: Program> Daemon<P> {
         Self: 'static,
         P::Message: message::MaybeDebug + message::MaybeClone,
     {
+        use program::graphics::{Compositor, compositor};
+
+        self.run_with_compositor(|settings, display, window, shell| {
+            <P::Renderer as compositor::Default>::Compositor::new(settings, display, window, shell)
+        })
+    }
+
+    /// Runs the [`Daemon`] with an application-scoped compositor factory.
+    ///
+    /// Creation is lazy: the factory is called when the first window opens,
+    /// when a window opens after the last one closed, and when the backend is
+    /// reconfigured. Each compositor is shared by all windows until replaced.
+    ///
+    /// The factory receives owned context. Capture owned application resources
+    /// and clone them into the returned future; neither the factory nor its
+    /// future may borrow stack-local context. The compositor must use the
+    /// daemon's existing renderer type.
+    pub fn run_with_compositor<C, F, Fut>(self, factory: F) -> Result
+    where
+        Self: 'static,
+        P::Message: message::MaybeDebug + message::MaybeClone,
+        C: program::graphics::Compositor<Renderer = P::Renderer> + 'static,
+        F: FnMut(
+                iced_core::backend::Settings,
+                shell::winit::event_loop::OwnedDisplayHandle,
+                std::sync::Arc<shell::winit::window::Window>,
+                program::graphics::Shell,
+            ) -> Fut
+            + 'static,
+        Fut: Future<Output = std::result::Result<C, iced_core::backend::Error>> + 'static,
+    {
         #[cfg(feature = "debug")]
         iced_debug::init(iced_debug::Metadata {
             name: P::name(),
@@ -147,7 +178,7 @@ impl<P: Program> Daemon<P> {
         #[cfg(feature = "hot")]
         let program = Hot::new(program);
 
-        Ok(shell::run(program)?)
+        Ok(shell::run_with_compositor(program, factory)?)
     }
 
     /// Sets the [`Settings`] that will be used to run the [`Daemon`].
@@ -187,7 +218,7 @@ impl<P: Program> Daemon<P> {
     pub fn title(
         self,
         title: impl TitleFn<P::State>,
-    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme>> {
+    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme, Renderer = P::Renderer>> {
         Daemon {
             raw: WithTitle {
                 program: self.raw,
@@ -202,7 +233,7 @@ impl<P: Program> Daemon<P> {
     pub fn subscription(
         self,
         f: impl Fn(&P::State) -> Subscription<P::Message>,
-    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme>> {
+    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme, Renderer = P::Renderer>> {
         Daemon {
             raw: program::with_subscription(self.raw, f),
             settings: self.settings,
@@ -214,7 +245,7 @@ impl<P: Program> Daemon<P> {
     pub fn theme(
         self,
         f: impl ThemeFn<P::State, P::Theme>,
-    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme>> {
+    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme, Renderer = P::Renderer>> {
         Daemon {
             raw: WithTheme {
                 program: self.raw,
@@ -229,7 +260,7 @@ impl<P: Program> Daemon<P> {
     pub fn style(
         self,
         f: impl Fn(&P::State, &P::Theme) -> theme::Style,
-    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme>> {
+    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme, Renderer = P::Renderer>> {
         Daemon {
             raw: program::with_style(self.raw, f),
             settings: self.settings,
@@ -241,7 +272,7 @@ impl<P: Program> Daemon<P> {
     pub fn scale_factor(
         self,
         f: impl Fn(&P::State, window::Id) -> f32,
-    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme>> {
+    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme, Renderer = P::Renderer>> {
         Daemon {
             raw: WithScaleFactor {
                 program: self.raw,
@@ -255,7 +286,7 @@ impl<P: Program> Daemon<P> {
     /// Sets the executor of the [`Daemon`].
     pub fn executor<E>(
         self,
-    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme>>
+    ) -> Daemon<impl Program<State = P::State, Message = P::Message, Theme = P::Theme, Renderer = P::Renderer>>
     where
         E: Executor,
     {

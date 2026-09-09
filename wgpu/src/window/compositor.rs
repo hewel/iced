@@ -232,15 +232,31 @@ pub fn present(
     background_color: Color,
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
-    match surface.get_current_texture() {
+    let synchronization = renderer.engine.queue_synchronization.clone();
+    let current = {
+        let _guard = synchronization.as_deref().map(crate::QueueGuard::acquire);
+        match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                // Discard also touches native swapchain state.
+                drop(frame);
+                return Err(compositor::SurfaceError::Outdated);
+            }
+            current => current,
+        }
+    };
+
+    match current {
         wgpu::CurrentSurfaceTexture::Success(frame) => {
-            let view = &frame
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+            let frame = SurfaceFrame {
+                frame: Some(frame),
+                synchronization: synchronization.as_deref(),
+            };
+            let texture = &frame.frame.as_ref().expect("unpresented frame").texture;
+            let view = &texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             let _submission = renderer.present(
                 Some(background_color),
-                frame.texture.format(),
+                texture.format(),
                 view,
                 viewport,
             );
@@ -251,13 +267,37 @@ pub fn present(
 
             Ok(())
         }
-        wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
+        wgpu::CurrentSurfaceTexture::Suboptimal(_) => unreachable!("discarded during acquisition"),
+        wgpu::CurrentSurfaceTexture::Outdated => {
             Err(compositor::SurfaceError::Outdated)
         }
         wgpu::CurrentSurfaceTexture::Timeout => Err(compositor::SurfaceError::Timeout),
         wgpu::CurrentSurfaceTexture::Occluded => Err(compositor::SurfaceError::Occluded),
         wgpu::CurrentSurfaceTexture::Lost => Err(compositor::SurfaceError::Lost),
         wgpu::CurrentSurfaceTexture::Validation => Err(compositor::SurfaceError::Other),
+    }
+}
+
+// Own the acquired frame without retaining a queue lock while rendering. This
+// also serializes discard if drawing or the pre-present callback unwinds.
+struct SurfaceFrame<'a> {
+    frame: Option<wgpu::SurfaceTexture>,
+    synchronization: Option<&'a dyn crate::QueueSynchronization>,
+}
+
+impl SurfaceFrame<'_> {
+    fn present(mut self) {
+        let _guard = self.synchronization.map(crate::QueueGuard::acquire);
+        self.frame.take().expect("unpresented frame").present();
+    }
+}
+
+impl Drop for SurfaceFrame<'_> {
+    fn drop(&mut self) {
+        if self.frame.is_some() {
+            let _guard = self.synchronization.map(crate::QueueGuard::acquire);
+            drop(self.frame.take());
+        }
     }
 }
 
@@ -316,6 +356,7 @@ impl graphics::Compositor for Compositor {
     }
 
     fn configure_surface(&mut self, surface: &mut Self::Surface, width: u32, height: u32) {
+        let _guard = self.engine.queue_synchronization.as_deref().map(crate::QueueGuard::acquire);
         surface.configure(
             &self.engine.device,
             &wgpu::SurfaceConfiguration {

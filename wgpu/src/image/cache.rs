@@ -13,6 +13,8 @@ use std::sync::Arc;
 pub struct Cache {
     atlas: Atlas,
     #[cfg(feature = "image")]
+    queue_synchronization: Option<Arc<dyn crate::QueueSynchronization>>,
+    #[cfg(feature = "image")]
     raster: Raster,
     #[cfg(feature = "svg")]
     vector: crate::image::vector::Cache,
@@ -38,12 +40,17 @@ impl Cache {
         backend: wgpu::Backend,
         layout: wgpu::BindGroupLayout,
         _shell: &Shell,
+        _queue_synchronization: Option<Arc<dyn crate::QueueSynchronization>>,
     ) -> Self {
         #[cfg(all(feature = "image", not(target_arch = "wasm32")))]
-        let worker = Worker::new(device, _queue, backend, layout.clone(), _shell);
+        let worker = Worker::new(
+            device, _queue, backend, layout.clone(), _shell, _queue_synchronization.clone(),
+        );
 
         Self {
             atlas: Atlas::new(device, backend, layout),
+            #[cfg(feature = "image")]
+            queue_synchronization: _queue_synchronization,
             #[cfg(feature = "image")]
             raster: Raster {
                 cache: crate::image::raster::Cache::default(),
@@ -127,7 +134,10 @@ impl Cache {
                 );
 
                 self.raster.belt.finish();
-                let submission = queue.submit([encoder.finish()]);
+                let submission = {
+                    let _guard = self.queue_synchronization.as_deref().map(crate::QueueGuard::acquire);
+                    queue.submit([encoder.finish()])
+                };
                 self.raster.belt.recall();
 
                 let Some(entry) = entry else {
@@ -416,6 +426,7 @@ mod worker {
             backend: wgpu::Backend,
             texture_layout: wgpu::BindGroupLayout,
             shell: &Shell,
+            queue_synchronization: Option<Arc<dyn crate::QueueSynchronization>>,
         ) -> Self {
             let (jobs_sender, jobs_receiver) = mpsc::sync_channel(1_000);
             let (quit_sender, quit_receiver) = mpsc::sync_channel(1);
@@ -424,6 +435,7 @@ mod worker {
             let instance = Instance {
                 device: device.clone(),
                 queue: queue.clone(),
+                queue_synchronization,
                 backend,
                 texture_layout,
                 shell: shell.clone(),
@@ -477,6 +489,7 @@ mod worker {
     pub struct Instance {
         device: wgpu::Device,
         queue: wgpu::Queue,
+        queue_synchronization: Option<Arc<dyn crate::QueueSynchronization>>,
         backend: wgpu::Backend,
         texture_layout: wgpu::BindGroupLayout,
         shell: Shell,
@@ -597,20 +610,25 @@ mod worker {
             let shell = self.shell.clone();
 
             self.belt.finish();
-            let submission = self.queue.submit([encoder.finish()]);
-            self.belt.recall();
-
             let bind_group = atlas.bind_group().clone();
+            let submission = {
+                let _guard = self.queue_synchronization.as_deref().map(crate::QueueGuard::acquire);
+                let submission = self.queue.submit([encoder.finish()]);
 
-            self.queue.on_submitted_work_done(move || {
-                let _ = output.send(Work::Upload {
-                    handle,
-                    entry,
-                    bind_group,
+                // This callback can run during a later guarded submit. Keep it
+                // CPU-only: it must not reenter the gate or a native renderer.
+                self.queue.on_submitted_work_done(move || {
+                    let _ = output.send(Work::Upload {
+                        handle,
+                        entry,
+                        bind_group,
+                    });
+
+                    callback(&shell);
                 });
-
-                callback(&shell);
-            });
+                submission
+            };
+            self.belt.recall();
 
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),

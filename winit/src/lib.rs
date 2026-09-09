@@ -72,6 +72,34 @@ where
     P: Program + 'static,
     P::Theme: theme::Base,
 {
+    run_with_compositor(program, |settings, display, window, shell| {
+        <P::Renderer as compositor::Default>::Compositor::new(settings, display, window, shell)
+    })
+}
+
+/// Runs a [`Program`] with an application-scoped compositor factory.
+///
+/// The factory is called lazily for the first window, after reopening from no
+/// windows, and for backend reconfiguration. Its compositor is shared by all
+/// windows and must preserve the program's renderer type.
+///
+/// All context passed to the factory is owned. Capture owned resources and
+/// clone them into the returned future instead of borrowing the factory or
+/// stack-local state.
+pub fn run_with_compositor<P, C, F, Fut>(program: P, factory: F) -> Result<(), Error>
+where
+    P: Program + 'static,
+    P::Theme: theme::Base,
+    C: Compositor<Renderer = P::Renderer> + 'static,
+    F: FnMut(
+            backend::Settings,
+            winit::event_loop::OwnedDisplayHandle,
+            Arc<winit::window::Window>,
+            Shell,
+        ) -> Fut
+        + 'static,
+    Fut: Future<Output = Result<C, backend::Error>> + 'static,
+{
     use winit::event_loop::EventLoop;
 
     let boot_span = debug::boot();
@@ -129,13 +157,14 @@ where
     let (control_sender, control_receiver) = mpsc::unbounded();
     let (system_theme_sender, system_theme_receiver) = oneshot::channel();
 
-    let instance: std::pin::Pin<Box<dyn Future<Output = ()>>> = Box::pin(run_instance::<P>(
+    let instance: std::pin::Pin<Box<dyn Future<Output = ()>>> = Box::pin(run_instance::<P, C, F, Fut>(
         program,
         runtime,
         proxy.clone(),
         event_receiver,
         control_sender,
         display_handle,
+        factory,
         is_daemon,
         backend_settings,
         renderer_settings,
@@ -463,13 +492,14 @@ enum Control {
     SetAutomaticWindowTabbing(bool),
 }
 
-async fn run_instance<P>(
+async fn run_instance<P, C, F, Fut>(
     mut program: program::Instance<P>,
     mut runtime: Runtime<P::Executor, Proxy<P::Message>, Action<P::Message>>,
     mut proxy: Proxy<P::Message>,
     mut event_receiver: mpsc::UnboundedReceiver<Event<Action<P::Message>>>,
     mut control_sender: mpsc::UnboundedSender<Control>,
     display_handle: winit::event_loop::OwnedDisplayHandle,
+    mut factory: F,
     is_daemon: bool,
     backend_settings: backend::Settings,
     mut renderer_settings: renderer::Settings,
@@ -478,6 +508,15 @@ async fn run_instance<P>(
 ) where
     P: Program + 'static,
     P::Theme: theme::Base,
+    C: Compositor<Renderer = P::Renderer> + 'static,
+    F: FnMut(
+            backend::Settings,
+            winit::event_loop::OwnedDisplayHandle,
+            Arc<winit::window::Window>,
+            Shell,
+        ) -> Fut
+        + 'static,
+    Fut: Future<Output = Result<C, backend::Error>> + 'static,
 {
     use winit::event;
     use winit::event_loop::ControlFlow;
@@ -485,7 +524,7 @@ async fn run_instance<P>(
     let mut window_manager = window::Manager::new();
     let mut is_window_opening = !is_daemon;
 
-    let mut compositor = None;
+    let mut compositor: Option<C> = None;
     let mut events = Vec::new();
     let mut messages = shell::Bus::new();
     let mut actions = 0;
@@ -552,23 +591,17 @@ async fn run_instance<P>(
                     let (compositor_sender, compositor_receiver) = oneshot::channel();
 
                     let create_compositor = {
-                        let window = window.clone();
-                        let backend_settings = backend_settings.clone();
-                        let display_handle = display_handle.clone();
+                        let future = factory(
+                            backend_settings.clone(),
+                            display_handle.clone(),
+                            window.clone(),
+                            Shell::new(proxy.clone()),
+                        );
                         let proxy = proxy.clone();
                         let default_fonts = default_fonts.clone();
 
                         async move {
-                            let shell = Shell::new(proxy.clone());
-
-                            let mut compositor =
-                                <P::Renderer as compositor::Default>::Compositor::new(
-                                    backend_settings,
-                                    display_handle,
-                                    window,
-                                    shell,
-                                )
-                                .await;
+                            let mut compositor = future.await;
 
                             if let Ok(compositor) = &mut compositor {
                                 for font in default_fonts {
@@ -721,6 +754,8 @@ async fn run_instance<P>(
                             &proxy,
                             &mut runtime,
                             &mut compositor,
+                            &mut factory,
+                            &display_handle,
                             &mut events,
                             &mut messages,
                             &mut clipboard,
@@ -843,6 +878,8 @@ async fn run_instance<P>(
                                         &proxy,
                                         &mut runtime,
                                         &mut compositor,
+                                        &mut factory,
+                                        &display_handle,
                                         &mut events,
                                         &mut messages,
                                         &mut clipboard,
@@ -1034,6 +1071,8 @@ async fn run_instance<P>(
                                 &proxy,
                                 &mut runtime,
                                 &mut compositor,
+                                &mut factory,
+                                &display_handle,
                                 &mut events,
                                 &mut messages,
                                 &mut clipboard,
@@ -1167,6 +1206,8 @@ async fn run_instance<P>(
                                     &proxy,
                                     &mut runtime,
                                     &mut compositor,
+                                    &mut factory,
+                                    &display_handle,
                                     &mut events,
                                     &mut messages,
                                     &mut clipboard,
@@ -1201,6 +1242,9 @@ async fn run_instance<P>(
     }
 
     let _ = ManuallyDrop::into_inner(user_interfaces);
+    // Window renderers and surfaces may depend on resources owned by the compositor.
+    drop(window_manager);
+    drop(compositor);
 }
 
 /// Builds a window's [`UserInterface`] for the [`Program`].
@@ -1280,12 +1324,14 @@ where
     actions
 }
 
-fn run_action<'a, P, C>(
+fn run_action<'a, P, C, F, Fut>(
     action: Action<P::Message>,
     program: &'a program::Instance<P>,
     _proxy: &Proxy<P::Message>,
     runtime: &mut Runtime<P::Executor, Proxy<P::Message>, Action<P::Message>>,
     compositor: &mut Option<C>,
+    factory: &mut F,
+    display_handle: &winit::event_loop::OwnedDisplayHandle,
     events: &mut Vec<(window::Id, core::Event)>,
     messages: &mut shell::Bus<P::Message>,
     clipboard: &mut Clipboard,
@@ -1300,6 +1346,14 @@ fn run_action<'a, P, C>(
     P: Program,
     C: Compositor<Renderer = P::Renderer> + 'static,
     P::Theme: theme::Base,
+    F: FnMut(
+            backend::Settings,
+            winit::event_loop::OwnedDisplayHandle,
+            Arc<winit::window::Window>,
+            Shell,
+        ) -> Fut
+        + 'static,
+    Fut: Future<Output = Result<C, backend::Error>> + 'static,
 {
     use crate::core::Renderer as _;
     use crate::runtime::backend;
@@ -1726,9 +1780,9 @@ fn run_action<'a, P, C>(
                 let shell = Shell::new(_proxy.clone());
 
                 let mut new_compositor = if let Some(window) = window_manager.first() {
-                    match runtime.block_on(C::new(
+                    match runtime.block_on(factory(
                         settings,
-                        window.raw.clone(),
+                        display_handle.clone(),
                         window.raw.clone(),
                         shell,
                     )) {

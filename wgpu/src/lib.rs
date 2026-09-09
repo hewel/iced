@@ -34,6 +34,7 @@ mod buffer;
 mod color;
 mod engine;
 mod quad;
+mod queue;
 mod text;
 mod triangle;
 
@@ -56,6 +57,7 @@ pub use wgpu;
 pub use engine::Engine;
 pub use layer::Layer;
 pub use primitive::Primitive;
+pub use queue::{QueueGuard, QueueSynchronization};
 
 #[cfg(feature = "geometry")]
 pub use geometry::Geometry;
@@ -186,7 +188,10 @@ impl Renderer {
         let encoder = self.draw(clear_color, frame, viewport);
 
         self.staging_belt.finish();
-        let submission = self.engine.queue.submit([encoder.finish()]);
+        let submission = {
+            let _guard = self.engine.queue_synchronization.as_deref().map(QueueGuard::acquire);
+            self.engine.queue.submit([encoder.finish()])
+        };
         self.staging_belt.recall();
         submission
     }
@@ -277,7 +282,10 @@ impl Renderer {
         );
 
         self.staging_belt.finish();
-        let index = self.engine.queue.submit([encoder.finish()]);
+        let index = {
+            let _guard = self.engine.queue_synchronization.as_deref().map(QueueGuard::acquire);
+            self.engine.queue.submit([encoder.finish()])
+        };
         self.staging_belt.recall();
 
         let slice = output_buffer.slice(..);
