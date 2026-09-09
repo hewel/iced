@@ -292,6 +292,10 @@ impl Default for Direction {
 }
 
 /// A scrollbar within a [`Scrollable`].
+///
+/// The thumb is at least 32 logical pixels long, capped to the available track.
+/// By default, the track and drag hit area are 14 logical pixels wide, while the
+/// thumb is drawn 10 logical pixels wide.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Scrollbar {
     width: f32,
@@ -304,7 +308,7 @@ pub struct Scrollbar {
 impl Default for Scrollbar {
     fn default() -> Self {
         Self {
-            width: 10.0,
+            width: 14.0,
             margin: 0.0,
             scroller_width: 10.0,
             alignment: Anchor::Start,
@@ -325,7 +329,10 @@ impl Scrollbar {
         Self::default().width(0).scroller_width(0)
     }
 
-    /// Sets the scrollbar width of the [`Scrollbar`] .
+    /// Sets the track width of the [`Scrollbar`]. Defaults to 14 logical pixels.
+    ///
+    /// The drag hit area spans the greater of this width and the scroller width,
+    /// plus the margins. This does not change the drawn scroller width.
     pub fn width(mut self, width: impl Into<Pixels>) -> Self {
         self.width = width.into().0.max(0.0);
         self
@@ -337,7 +344,7 @@ impl Scrollbar {
         self
     }
 
-    /// Sets the scroller width of the [`Scrollbar`] .
+    /// Sets the drawn thumb width of the [`Scrollbar`]. Defaults to 10 logical pixels.
     pub fn scroller_width(mut self, scroller_width: impl Into<Pixels>) -> Self {
         self.scroller_width = scroller_width.into().0.max(0.0);
         self
@@ -593,11 +600,11 @@ where
                                 return;
                             };
 
-                            state.scroll_y_to(
-                                scrollbar.scroll_percentage_y(scroller_grabbed_at, cursor_position),
-                                bounds,
-                                content_bounds,
-                            );
+                            if let Some(percentage) =
+                                scrollbar.scroll_percentage_y(scroller_grabbed_at, cursor_position)
+                            {
+                                state.scroll_y_to(percentage, bounds, content_bounds);
+                            }
 
                             let _ = notify_scroll(
                                 state,
@@ -623,11 +630,11 @@ where
                         if let (Some(scroller_grabbed_at), Some(scrollbar)) =
                             (scrollbars.grab_y_scroller(cursor_position), scrollbars.y)
                         {
-                            state.scroll_y_to(
-                                scrollbar.scroll_percentage_y(scroller_grabbed_at, cursor_position),
-                                bounds,
-                                content_bounds,
-                            );
+                            if let Some(percentage) =
+                                scrollbar.scroll_percentage_y(scroller_grabbed_at, cursor_position)
+                            {
+                                state.scroll_y_to(percentage, bounds, content_bounds);
+                            }
 
                             state.interaction = Interaction::YScrollerGrabbed(scroller_grabbed_at);
 
@@ -655,11 +662,11 @@ where
                         };
 
                         if let Some(scrollbar) = scrollbars.x {
-                            state.scroll_x_to(
-                                scrollbar.scroll_percentage_x(scroller_grabbed_at, cursor_position),
-                                bounds,
-                                content_bounds,
-                            );
+                            if let Some(percentage) =
+                                scrollbar.scroll_percentage_x(scroller_grabbed_at, cursor_position)
+                            {
+                                state.scroll_x_to(percentage, bounds, content_bounds);
+                            }
 
                             let _ = notify_scroll(
                                 state,
@@ -685,11 +692,11 @@ where
                         if let (Some(scroller_grabbed_at), Some(scrollbar)) =
                             (scrollbars.grab_x_scroller(cursor_position), scrollbars.x)
                         {
-                            state.scroll_x_to(
-                                scrollbar.scroll_percentage_x(scroller_grabbed_at, cursor_position),
-                                bounds,
-                                content_bounds,
-                            );
+                            if let Some(percentage) =
+                                scrollbar.scroll_percentage_x(scroller_grabbed_at, cursor_position)
+                            {
+                                state.scroll_x_to(percentage, bounds, content_bounds);
+                            }
 
                             state.interaction = Interaction::XScrollerGrabbed(scroller_grabbed_at);
 
@@ -1801,14 +1808,16 @@ impl Scrollbars {
             let scroller = if ratio >= 1.0 {
                 None
             } else {
-                // min height for easier grabbing with super tall content
-                let scroller_height = (scrollbar_bounds.height * ratio).max(2.0);
-                let scroller_offset =
-                    translation.y * ratio * scrollbar_bounds.height / bounds.height;
+                let scroller_height = (scrollbar_bounds.height * ratio)
+                    .max(32.0)
+                    .min(scrollbar_bounds.height);
+                let scroller_offset = (translation.y / (content_bounds.height - bounds.height))
+                    .clamp(0.0, 1.0)
+                    * (scrollbar_bounds.height - scroller_height);
 
                 let scroller_bounds = Rectangle {
                     x: bounds.x + bounds.width - total_scrollbar_width / 2.0 - scroller_width / 2.0,
-                    y: (scrollbar_bounds.y + scroller_offset).max(0.0),
+                    y: scrollbar_bounds.y + scroller_offset,
                     width: scroller_width,
                     height: scroller_height,
                 };
@@ -1865,12 +1874,15 @@ impl Scrollbars {
             let scroller = if ratio >= 1.0 {
                 None
             } else {
-                // min width for easier grabbing with extra wide content
-                let scroller_length = (scrollbar_bounds.width * ratio).max(2.0);
-                let scroller_offset = translation.x * ratio * scrollbar_bounds.width / bounds.width;
+                let scroller_length = (scrollbar_bounds.width * ratio)
+                    .max(32.0)
+                    .min(scrollbar_bounds.width);
+                let scroller_offset = (translation.x / (content_bounds.width - bounds.width))
+                    .clamp(0.0, 1.0)
+                    * (scrollbar_bounds.width - scroller_length);
 
                 let scroller_bounds = Rectangle {
-                    x: (scrollbar_bounds.x + scroller_offset).max(0.0),
+                    x: scrollbar_bounds.x + scroller_offset,
                     y: bounds.y + bounds.height
                         - total_scrollbar_height / 2.0
                         - scroller_width / 2.0,
@@ -1930,11 +1942,16 @@ impl Scrollbars {
         let scroller = scrollbar.scroller?;
 
         if scrollbar.total_bounds.contains(cursor_position) {
-            Some(if scroller.bounds.contains(cursor_position) {
-                (cursor_position.y - scroller.bounds.y) / scroller.bounds.height
-            } else {
-                0.5
-            })
+            Some(
+                if scroller.bounds.height > 0.0
+                    && cursor_position.y >= scroller.bounds.y
+                    && cursor_position.y <= scroller.bounds.y + scroller.bounds.height
+                {
+                    (cursor_position.y - scroller.bounds.y) / scroller.bounds.height
+                } else {
+                    0.5
+                },
+            )
         } else {
             None
         }
@@ -1945,11 +1962,16 @@ impl Scrollbars {
         let scroller = scrollbar.scroller?;
 
         if scrollbar.total_bounds.contains(cursor_position) {
-            Some(if scroller.bounds.contains(cursor_position) {
-                (cursor_position.x - scroller.bounds.x) / scroller.bounds.width
-            } else {
-                0.5
-            })
+            Some(
+                if scroller.bounds.width > 0.0
+                    && cursor_position.x >= scroller.bounds.x
+                    && cursor_position.x <= scroller.bounds.x + scroller.bounds.width
+                {
+                    (cursor_position.x - scroller.bounds.x) / scroller.bounds.width
+                } else {
+                    0.5
+                },
+            )
         } else {
             None
         }
@@ -1981,35 +2003,46 @@ pub(super) mod internals {
         }
 
         /// Returns the y-axis scrolled percentage from the cursor position.
-        pub fn scroll_percentage_y(&self, grabbed_at: f32, cursor_position: Point) -> f32 {
-            if let Some(scroller) = self.scroller {
-                let percentage =
-                    (cursor_position.y - self.bounds.y - scroller.bounds.height * grabbed_at)
-                        / (self.bounds.height - scroller.bounds.height);
+        ///
+        /// Returns `None` when the thumb has no room to move, preserving the scroll offset.
+        pub fn scroll_percentage_y(&self, grabbed_at: f32, cursor_position: Point) -> Option<f32> {
+            let scroller = self.scroller?;
+            let travel = self.bounds.height - scroller.bounds.height;
 
-                match self.alignment {
-                    Anchor::Start => percentage,
-                    Anchor::End => 1.0 - percentage,
-                }
-            } else {
-                0.0
+            if travel <= 0.0 {
+                return None;
             }
+
+            let percentage =
+                ((cursor_position.y - self.bounds.y - scroller.bounds.height * grabbed_at)
+                    / travel)
+                    .clamp(0.0, 1.0);
+
+            Some(match self.alignment {
+                Anchor::Start => percentage,
+                Anchor::End => 1.0 - percentage,
+            })
         }
 
         /// Returns the x-axis scrolled percentage from the cursor position.
-        pub fn scroll_percentage_x(&self, grabbed_at: f32, cursor_position: Point) -> f32 {
-            if let Some(scroller) = self.scroller {
-                let percentage =
-                    (cursor_position.x - self.bounds.x - scroller.bounds.width * grabbed_at)
-                        / (self.bounds.width - scroller.bounds.width);
+        ///
+        /// Returns `None` when the thumb has no room to move, preserving the scroll offset.
+        pub fn scroll_percentage_x(&self, grabbed_at: f32, cursor_position: Point) -> Option<f32> {
+            let scroller = self.scroller?;
+            let travel = self.bounds.width - scroller.bounds.width;
 
-                match self.alignment {
-                    Anchor::Start => percentage,
-                    Anchor::End => 1.0 - percentage,
-                }
-            } else {
-                0.0
+            if travel <= 0.0 {
+                return None;
             }
+
+            let percentage =
+                ((cursor_position.x - self.bounds.x - scroller.bounds.width * grabbed_at) / travel)
+                    .clamp(0.0, 1.0);
+
+            Some(match self.alignment {
+                Anchor::Start => percentage,
+                Anchor::End => 1.0 - percentage,
+            })
         }
     }
 
@@ -2224,3 +2257,6 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

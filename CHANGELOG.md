@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cumulative `Renderer::blur_statistics`, shared offscreen blur regressions, an opt-in CPU/GPU timestamp measurement driver, and the `native_blur` manual acceptance example.
 
 ### Changed
+- Scrollbars use a 14-logical-pixel track and drag hit area by default while retaining a 10-logical-pixel drawn thumb. Explicit widths and hidden scrollbars remain supported.
 - `Image` gains a public `blur` field and `gradient::Linear` gains `reference_bounds`; explicit struct literals must initialize them. Custom renderers must implement `Renderer::blur_backdrop`.
 - Advanced `wgpu::Renderer::draw` calls with positive scene blur require an explicit clear color; `None` cannot preserve pre-existing pixels in a render-attachment-only target. Normal window composition already supplies the clear color.
 
 ### Fixed
+- Scrollbar thumbs have a minimum length of 32 logical pixels, capped to their track. Dragging uses the actual available travel on both axes and anchors, preserves offsets when no travel is available, and keeps the axial grab position when pressing the thumb's expanded side hit area.
 - Consistent distance-based quad and image antialiasing, constant-width inside borders, and saturated borders without residual center fill.
 - Gradient quad instance offsets and gradient shadows in the native GPU renderer.
 - Rotated fragmented image placement and atlas gutter sampling across source fragments.
