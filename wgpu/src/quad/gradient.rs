@@ -84,6 +84,8 @@ impl Pipeline {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("iced_wgpu.quad.gradient.shader"),
                 source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(concat!(
+                    include_str!("../shader/quad/snap.wgsl"),
+                    "\n",
                     include_str!("../shader/shape.wgsl"),
                     "\n",
                     include_str!("../shader/quad.wgsl"),

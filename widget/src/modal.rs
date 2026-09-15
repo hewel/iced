@@ -133,7 +133,7 @@ where
         renderer: &Renderer,
         viewport: &Rectangle,
         translation: core::Vector,
-    ) -> Option<core::overlay::Element<'b, Message, Theme, Renderer>> {
+    ) -> Vec<core::overlay::Element<'b, Message, Theme, Renderer>> {
         self.content
             .as_widget_mut()
             .overlay(tree, layout, renderer, viewport, translation)
