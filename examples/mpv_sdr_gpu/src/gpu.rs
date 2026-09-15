@@ -115,7 +115,24 @@ impl DeviceContext {
                 return Err("libplacebo requires hostQueryReset and timelineSemaphore".into());
             }
 
-            let extensions = hal.required_device_extensions(desc.required_features);
+            let mut extensions = hal.required_device_extensions(desc.required_features);
+            let supported_extensions =
+                raw_instance.enumerate_device_extension_properties(physical_device)?;
+            // Enable optional DMA-BUF imports on the actual shared device. Vulkan
+            // 1.2 supplies their core dependencies; unsupported extensions must
+            // not prevent software decoding or copy-back playback.
+            for extension in [
+                ash::khr::external_memory_fd::NAME,
+                ash::ext::external_memory_dma_buf::NAME,
+                ash::ext::image_drm_format_modifier::NAME,
+            ] {
+                let supported = supported_extensions.iter().any(|properties| {
+                    std::ffi::CStr::from_ptr(properties.extension_name.as_ptr()) == extension
+                });
+                if supported && !extensions.contains(&extension) {
+                    extensions.push(extension);
+                }
+            }
             let extension_names: Vec<_> = extensions.iter().map(|name| name.as_ptr()).collect();
             let mut hal_features =
                 Box::new(hal.physical_device_features(&extensions, desc.required_features));

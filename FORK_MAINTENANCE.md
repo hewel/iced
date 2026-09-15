@@ -45,6 +45,14 @@ Use `git show <commit>` for rationale and the exact changed-file set.
 
 ### Contracts at the synchronization boundary
 
+The isolation example optionally enables supported `VK_KHR_external_memory_fd`,
+`VK_EXT_external_memory_dma_buf`, and `VK_EXT_image_drm_format_modifier` extensions
+on its actual Vulkan device. The same enabled set is used for HAL import and
+reported to mpv; missing optional extensions do not reject device creation.
+This permits testing direct VAAPI import with a matching mpv host, but does not
+establish hardware decoding or support for a particular plane format/modifier.
+The application's separate device creation path requires its own integration.
+
 - The factory is application-scoped, not called once per window. It receives owned
   backend settings, display handle, `Arc<Window>`, and graphics `Shell`; its owned
   `'static` future returns `Result<C, backend::Error>`. Neither factory nor future
