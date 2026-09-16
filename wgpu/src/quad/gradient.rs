@@ -106,7 +106,7 @@ impl Pipeline {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("gradient_vs_main"),
-                    buffers: &[wgpu::VertexBufferLayout {
+                    buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Gradient>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
@@ -204,7 +204,7 @@ impl Pipeline {
                                 shader_location: 14,
                             },
                         ],
-                    }],
+                    })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {

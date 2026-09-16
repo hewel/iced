@@ -199,7 +199,12 @@ bytemuck = { version = "1.0", features = ["derive"] }
 bytes = "1.6"
 cargo-hot = { version = "0.1", package = "cargo-hot-protocol" }
 cosmic-text = { git = "https://github.com/hecrj/cosmic-text.git", rev = "6e10ac2ce889f48c9eeb1f19c1340a37d6afae31" }
-cryoglyph = { git = "https://github.com/iced-rs/cryoglyph.git", rev = "e6aec585e0db7cc0281c37b4e66ee91d732adb92" }
+# TEMPORARY: cryoglyph with wgpu 30 support, until iced-rs/cryoglyph#4 merges
+# upstream. This is iced-rs/cryoglyph@e6aec585 (preserving the hecrj
+# `cosmic-text` fork and generation-based usage tracker pinned above) with
+# sertonix's wgpu-30 patch from PR #4 cherry-picked on top, hosted at
+# hewel/cryoglyph branch `wgpu-30`.
+cryoglyph = { git = "https://github.com/hewel/cryoglyph.git", rev = "35ee82a57b27c525a6b672a00ea9f33f7a4d2a05" }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 glam = "0.33.2"
 guillotiere = "0.6"
@@ -240,7 +245,7 @@ wasm-bindgen-futures = "0.4"
 wasmtimer = "0.4.2"
 web-sys = "=0.3.85"
 web-time = "1.1"
-wgpu = { version = "29", default-features = false, features = ["std", "wgsl"] }
+wgpu = { version = "30.0", default-features = false, features = ["std", "wgsl"] }
 winit = { git = "https://github.com/iced-rs/winit.git", rev = "05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed", default-features = false, features = ["rwh_06"] }
 
 [workspace.lints.rust]

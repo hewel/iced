@@ -98,7 +98,7 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("solid_vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Solid>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
@@ -178,7 +178,7 @@ impl Pipeline {
                             shader_location: 10,
                         },
                     ],
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {

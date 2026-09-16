@@ -92,6 +92,7 @@ impl Compositor {
             power_preference: wgpu::PowerPreference::from_env().unwrap_or(power_preference),
             compatible_surface: compatible_surface.as_ref(),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         };
 
         let adapter = instance
@@ -250,6 +251,7 @@ pub fn present(
             let frame = SurfaceFrame {
                 frame: Some(frame),
                 synchronization: synchronization.as_deref(),
+                queue: renderer.engine.queue.clone(),
             };
             let texture = &frame.frame.as_ref().expect("unpresented frame").texture;
             let view = &texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -283,12 +285,14 @@ pub fn present(
 struct SurfaceFrame<'a> {
     frame: Option<wgpu::SurfaceTexture>,
     synchronization: Option<&'a dyn crate::QueueSynchronization>,
+    queue: wgpu::Queue,
 }
 
 impl SurfaceFrame<'_> {
     fn present(mut self) {
         let _guard = self.synchronization.map(crate::QueueGuard::acquire);
-        self.frame.take().expect("unpresented frame").present();
+        self.queue
+            .present(self.frame.take().expect("unpresented frame"));
     }
 }
 
@@ -362,6 +366,7 @@ impl graphics::Compositor for Compositor {
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: self.format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 present_mode: self.settings.present_mode,
                 width,
                 height,

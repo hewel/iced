@@ -19,6 +19,7 @@ fn measure_native_blur() {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .unwrap();
     let features =
@@ -173,7 +174,7 @@ fn measure_native_blur() {
             })
             .unwrap();
         rx.recv().unwrap().unwrap();
-        let mapping = readback.slice(..).get_mapped_range();
+        let mapping = readback.slice(..).get_mapped_range().unwrap();
         let start = u64::from_le_bytes(mapping[0..8].try_into().unwrap());
         let end = u64::from_le_bytes(mapping[8..16].try_into().unwrap());
         let gpu_ms = (end - start) as f64 * f64::from(queue.get_timestamp_period()) / 1_000_000.0;

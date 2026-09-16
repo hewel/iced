@@ -140,6 +140,7 @@ impl App {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width,
             height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
@@ -413,7 +414,7 @@ impl winit::application::ApplicationHandler<Wake> for App {
                             renderer.present(None, config.format, &view, viewport);
                         }
                         window.pre_present_notify();
-                        frame.present();
+                        context.queue.present(frame);
                         // Counts successful surface-present calls, not scanout
                         // acknowledgements; this ABI exposes no per-image PTS.
                         *presentations += 1;
