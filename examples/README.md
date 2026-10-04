@@ -76,6 +76,63 @@ You can run it with `cargo run`:
 cargo run --package styling
 ```
 
+## Corner comparison
+
+Run the isolated native visual prototype:
+
+```sh
+cargo run --package custom_quad --bin corner_comparison
+```
+
+Compare circular corners, the current fixed-footprint superellipse, and a
+Figma-style cubic-shoulder / circular-arc construction. Radius and smoothing
+sliders, equal-radius / equal-footprint comparison, outline mode, dark mode,
+and window-only PNG capture are available. The first two columns use native
+quads; the Figma-style reference uses SVG. This compares silhouettes, not
+backend antialiasing or pixel-perfect parity with a Figma export.
+
+`--footprint`, `--dark`, and `--outline` set the initial comparison state.
+`--capture=/tmp/corners.png` saves the initial window and exits; pass these
+options after Cargo's `--`. The prototype intentionally stays within the
+available corner space and does not model saturated radii or capsule blending.
+The original `cargo run --package custom_quad` still opens its existing demo.
+
+## Blurred button borders
+
+```sh
+cargo run --package custom_quad --bin blur_border
+```
+
+This visual reproduction leaves the renderer unchanged. Three identical-source
+background rows (dark stripes, light stripes, and high-contrast checks) compare
+sharp translucent borders, blur without borders, blurred translucent borders,
+and blurred opaque borders. Adjust blur, border opacity/width, and surface tint.
+The tint-placement switch compares the existing button-background and
+`Image::tint` compositions; it does not select a renderer fix.
+
+Use `--thick` to start with 6 px borders, `--image-tint` for the full-mask tint
+composition, or `--capture=/tmp/blur-border.png` to save the initial window and
+exit. Pass these options after Cargo's `--`. These examples exercise same-source
+image-backed glass, not live-scene backdrop blur. Hover does not alter specimen
+styles, and each specimen remains a clickable native button.
+
+## Jellypilot BackGlass reproduction
+
+```sh
+cargo run --package custom_quad --bin back_glass
+```
+
+Reproduces the resting `detail/chrome.rs` glass-button layers with radius 12,
+smoothing 0.6, blur sigma 10, a 40% dark fill, and no stroke. The original
+left-fade mask remains circular; adjacent diagnostic samples change only that
+mask to smoothing 0.6 or omit it. Flat and textured synthetic blue sources
+replace the original hero artwork; the hero sampling frame is 960 x 520.
+This does not modify Jellypilot or the renderer.
+
+Optional `--font=<ManropeV5VF.ttf>` loads the application's font at weight 300.
+`--capture=/tmp/back-glass.png` saves the initial window and exits. Pass options
+after Cargo's `--`; the blur slider and Save PNG button work interactively.
+
 ## Extras
 A bunch of simpler examples exist:
 

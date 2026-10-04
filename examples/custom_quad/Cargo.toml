@@ -4,10 +4,11 @@ version = "0.1.0"
 authors = ["Robert Krahn"]
 edition = "2024"
 publish = false
+default-run = "custom_quad"
 
 [dependencies]
 iced.workspace = true
-iced.features = ["advanced", "image"]
+iced.features = ["advanced", "image", "svg"]
 
 image.workspace = true
 image.features = ["png"]
