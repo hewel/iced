@@ -12,19 +12,6 @@ struct Parameters {
 @fragment fn fs_main(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     let params = parameters.destination;
     let dimensions = parameters.source.zw;
-    let low = vec2(0.5) / dimensions;
-    let high = (parameters.source.xy - vec2(0.5)) / dimensions;
-    let uv = p.xy / params.xy * parameters.source.xy / dimensions;
-    if params.z < 0.01 { return textureSampleLevel(image, image_sampler, clamp(uv, low, high), 0, 0.0); }
-    let direction = select(vec2(0.0, 1.0), vec2(1.0, 0.0), params.w > 0.5) / dimensions;
-    let step = max(1.0, params.z * 3.0 / 24.0);
-    var result = vec4(0.0);
-    var total = 0.0;
-    for (var i = -24; i <= 24; i++) {
-        let distance = f32(i) * step;
-        let weight = exp(-0.5 * distance * distance / (params.z * params.z));
-        result += textureSampleLevel(image, image_sampler, clamp(uv + direction * distance, low, high), 0, 0.0) * weight;
-        total += weight;
-    }
-    return result / total;
+    let point = p.xy / params.xy * parameters.source.xy;
+    return gaussian(point, parameters.source.xy, dimensions, params.z, params.w > 0.5);
 }

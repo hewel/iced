@@ -17,6 +17,7 @@ pub type Stack = layer::Stack<Layer>;
 pub struct Layer {
     pub bounds: Rectangle,
     pub backdrop_blur: Option<f32>,
+    backdrop: Option<renderer::Backdrop>,
     pub quads: quad::Batch,
     pub triangles: triangle::Batch,
     pub primitives: primitive::Batch,
@@ -27,8 +28,25 @@ pub struct Layer {
 }
 
 impl Layer {
+    pub(crate) fn backdrop(&self) -> Option<renderer::Backdrop> {
+        self.backdrop.or_else(|| {
+            self.backdrop_blur.map(|radius| renderer::Backdrop {
+                // The legacy scalar operation always filters the whole lower
+                // scene, even when its marker is recorded inside a clip layer.
+                bounds: Rectangle::INFINITE,
+                blur: radius.into(),
+                ..renderer::Backdrop::default()
+            })
+        })
+    }
+
+    pub(crate) fn set_backdrop(&mut self, backdrop: renderer::Backdrop) {
+        self.backdrop = Some(backdrop);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.backdrop_blur.is_none()
+            && self.backdrop.is_none()
             && self.quads.is_empty()
             && self.triangles.is_empty()
             && self.primitives.is_empty()
@@ -329,7 +347,7 @@ impl Layer {
 
 impl graphics::Layer for Layer {
     fn is_barrier(&self) -> bool {
-        self.backdrop_blur.is_some()
+        self.backdrop_blur.is_some() || self.backdrop.is_some()
     }
     fn with_bounds(bounds: Rectangle) -> Self {
         Self {
@@ -354,6 +372,7 @@ impl graphics::Layer for Layer {
     fn reset(&mut self) {
         self.bounds = Rectangle::INFINITE;
         self.backdrop_blur = None;
+        self.backdrop = None;
 
         self.quads.clear();
         self.triangles.clear();
@@ -426,6 +445,7 @@ impl Default for Layer {
         Self {
             bounds: Rectangle::INFINITE,
             backdrop_blur: None,
+            backdrop: None,
             quads: quad::Batch::default(),
             triangles: triangle::Batch::default(),
             primitives: primitive::Batch::default(),

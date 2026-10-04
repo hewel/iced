@@ -42,6 +42,10 @@ where
         delegate!(self, renderer, renderer.blur_backdrop(radius));
     }
 
+    fn draw_backdrop(&mut self, backdrop: renderer::Backdrop) {
+        delegate!(self, renderer, renderer.draw_backdrop(backdrop));
+    }
+
     fn blur_statistics(&self) -> renderer::BlurStatistics {
         delegate!(self, renderer, renderer.blur_statistics())
     }

@@ -150,7 +150,14 @@ impl Renderer {
                 || !self
                     .layers
                     .iter()
-                    .any(|layer| layer.backdrop_blur.is_some()),
+                    .any(|layer| layer.backdrop().is_some_and(|backdrop| {
+                        backdrop_visible(
+                            backdrop,
+                            layer.bounds,
+                            viewport.scale_factor(),
+                            Rectangle::<f32>::from(Rectangle::with_size(viewport.physical_size())),
+                        )
+                    })),
             "scene backdrop blur requires an explicit clear color"
         );
         let mut encoder =
@@ -433,15 +440,21 @@ impl Renderer {
         use std::mem::ManuallyDrop;
 
         let destination = frame;
-        let scene = self
-            .layers
-            .iter()
-            .any(|layer| layer.backdrop_blur.is_some());
+        let scene = self.layers.iter().any(|layer| {
+            layer.backdrop().is_some_and(|backdrop| {
+                backdrop_visible(
+                    backdrop,
+                    layer.bounds,
+                    viewport.scale_factor(),
+                    Rectangle::<f32>::from(Rectangle::with_size(viewport.physical_size())),
+                )
+            })
+        });
         let size = [viewport.physical_width(), viewport.physical_height()];
         let intermediate = if scene {
-            let state = self
-                .scene_blur
-                .get_or_insert_with(|| blur::Scene::new(&self.engine.device, self.engine.format));
+            let state = self.scene_blur.get_or_insert_with(|| {
+                blur::Scene::new(&self.engine.device, self.engine.format, self.engine.backend)
+            });
             state.resize(&self.engine.device, size);
             Some(state.source.as_ref().unwrap().view.clone())
         } else {
@@ -507,14 +520,29 @@ impl Renderer {
         let scale = Transformation::scale(scale_factor);
 
         for layer in self.layers.iter() {
-            if let Some(radius) = layer.backdrop_blur {
+            if let Some(mut backdrop) = layer.backdrop().filter(|backdrop| {
+                backdrop_visible(*backdrop, layer.bounds, scale_factor, physical_bounds)
+            }) {
                 let _ = ManuallyDrop::into_inner(render_pass);
-                prefix = blur::fingerprint(&(prefix, radius));
+                let clip = if backdrop.bounds == Rectangle::INFINITE {
+                    physical_bounds
+                } else {
+                    layer.bounds * scale_factor
+                };
+                backdrop.bounds = if backdrop.bounds == Rectangle::INFINITE {
+                    physical_bounds
+                } else {
+                    backdrop.bounds * scale_factor
+                };
+                backdrop.blur = backdrop.blur.scaled(scale_factor);
+                backdrop.border_radius = backdrop.border_radius * scale_factor;
+                prefix = blur::fingerprint(&(prefix, backdrop, clip));
                 self.scene_blur.as_mut().unwrap().apply(
                     &self.engine.device,
                     encoder,
                     cacheable.then_some(prefix),
-                    radius * scale_factor,
+                    backdrop,
+                    clip,
                 );
                 render_pass =
                     ManuallyDrop::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -833,6 +861,26 @@ impl Renderer {
     }
 }
 
+fn backdrop_visible(
+    backdrop: core::renderer::Backdrop,
+    clip: Rectangle,
+    scale: f32,
+    viewport: Rectangle,
+) -> bool {
+    // Only the legacy scalar marker has infinite bounds. Its effect predates
+    // local backdrops and deliberately ignores the recording layer's clip.
+    if backdrop.bounds == Rectangle::INFINITE {
+        return backdrop.blur.maximum() > 0.0;
+    }
+    let bounds = backdrop.bounds * scale;
+    backdrop.blur.maximum() > 0.0
+        && bounds
+            .expand(0.5)
+            .intersection(&(clip * scale))
+            .and_then(|bounds| bounds.intersection(&viewport))
+            .is_some()
+}
+
 impl core::Renderer for Renderer {
     fn blur_backdrop(&mut self, radius: f32) {
         let radius = layer::normalize_blur(radius);
@@ -841,6 +889,39 @@ impl core::Renderer for Renderer {
         }
         let (layer, transformation) = self.layers.barrier();
         layer.backdrop_blur = Some(radius * transformation.scale_factor());
+    }
+
+    fn draw_backdrop(&mut self, mut backdrop: core::renderer::Backdrop) {
+        backdrop.blur = backdrop.blur.normalized();
+        if backdrop.blur.maximum() == 0.0
+            || !backdrop.bounds.x.is_finite()
+            || !backdrop.bounds.y.is_finite()
+            || !backdrop.bounds.width.is_finite()
+            || !backdrop.bounds.height.is_finite()
+            || backdrop.bounds.width <= 0.0
+            || backdrop.bounds.height <= 0.0
+        {
+            return;
+        }
+        let (layer, transformation) = self.layers.barrier();
+        let scale = transformation.scale_factor();
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        backdrop.bounds = backdrop.bounds * transformation;
+        backdrop.blur = backdrop.blur.scaled(scale);
+        let [top_left, top_right, bottom_right, bottom_left] =
+            <[f32; 4]>::from(backdrop.border_radius).map(|radius| {
+                graphics::shape::normalize_length(radius).min(f32::MAX / scale) * scale
+            });
+        backdrop.border_radius = core::border::Radius {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        };
+        backdrop.border_smoothing = graphics::shape::normalize_smoothing(backdrop.border_smoothing);
+        layer.set_backdrop(backdrop);
     }
 
     fn blur_statistics(&self) -> core::renderer::BlurStatistics {

@@ -112,6 +112,7 @@ image.workspace = true
 image.optional = true
 
 [dev-dependencies]
+half.workspace = true
 criterion = "0.5"
 iced_wgpu.workspace = true
 iced_renderer.workspace = true

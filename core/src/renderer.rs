@@ -22,6 +22,13 @@ pub trait Renderer {
     /// not a scope: it has no matching end operation.
     fn blur_backdrop(&mut self, radius: f32);
 
+    /// Blurs the previously drawn scene inside a rounded region, before its foreground.
+    ///
+    /// The profile follows the complete bounds even when clipped; neighboring
+    /// pixels may contribute to filtering, but only the masked region changes.
+    /// Renderers without local backdrop support leave the background unchanged.
+    fn draw_backdrop(&mut self, _backdrop: Backdrop) {}
+
     /// Returns cumulative blur cache counters and current resident allocation.
     fn blur_statistics(&self) -> BlurStatistics {
         BlurStatistics::default()
@@ -107,6 +114,19 @@ pub trait Renderer {
     ///
     /// By default, it does nothing.
     fn tick(&mut self) {}
+}
+
+/// A local region of the live scene to filter before drawing its foreground.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Backdrop {
+    /// Logical effect bounds and the blur profile's reference frame.
+    pub bounds: Rectangle,
+    /// Uniform or progressive sigma in logical pixels.
+    pub blur: crate::Blur,
+    /// Corner radii of the effect mask.
+    pub border_radius: crate::border::Radius,
+    /// Corner smoothing of the effect mask, normalized to `0..=1`.
+    pub border_smoothing: f32,
 }
 
 /// Cumulative blur cache activity and current resident blur memory.

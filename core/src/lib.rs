@@ -12,6 +12,7 @@
 pub mod alignment;
 pub mod animation;
 pub mod backend;
+pub mod blur;
 pub mod border;
 pub mod clipboard;
 pub mod color;
@@ -56,6 +57,7 @@ pub use angle::{Degrees, Radians};
 pub use animation::Animation;
 pub use backend::Backend;
 pub use background::Background;
+pub use blur::Blur;
 pub use border::Border;
 pub use clipboard::Clipboard;
 pub use code::Code;

@@ -230,7 +230,11 @@ impl State {
                 .iter()
                 .any(|image| matches!(image, Image::Raster { image, .. } if image.blur > 0.0))
         {
-            self.blur = Some(crate::blur::Pipeline::new(device, pipeline.format));
+            self.blur = Some(crate::blur::Pipeline::new(
+                device,
+                pipeline.format,
+                pipeline.backend,
+            ));
         }
         let blur = self.blur.as_ref();
         let mut atlas: Option<Arc<wgpu::BindGroup>> = None;
