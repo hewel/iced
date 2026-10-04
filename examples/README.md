@@ -133,6 +133,42 @@ Optional `--font=<ManropeV5VF.ttf>` loads the application's font at weight 300.
 `--capture=/tmp/back-glass.png` saves the initial window and exits. Pass options
 after Cargo's `--`; the blur slider and Save PNG button work interactively.
 
+## Progressive images and live glass
+
+```sh
+ICED_BACKEND=wgpu cargo run --package native_blur --bin progressive_blur
+ICED_BACKEND=tiny-skia cargo run --package native_blur --bin progressive_blur
+```
+
+The three image samples compare the same artwork with no blur, uniform blur,
+and a radius gradient. Set the maximum radius, switch between vertical and
+horizontal gradients, reverse the direction, or restrict the transition to
+the middle half. Both endpoints remain constant outside that transition.
+
+The lower scene draws scrollable text, images, colored cards, and an animated
+tile before two overlapping `backdrop` panels. Each panel blurs the actual
+content already drawn behind it; its own text and controls are drawn afterward.
+Corner radius applies to both the image samples and the glass panels.
+
+Visual acceptance is a separate manual check on each backend:
+
+- Compare fine lines at the clear end with the Original sample, including at
+  maximum blur. Reverse and change direction to inspect all four edges.
+- Scroll inside the lower scene and watch the moving tile pass under both
+  panels. Check the overlap, rounded corners, and the clipped window edge.
+- Pause motion, leave the scroll position still, and type in the rear panel
+  or press the front button. The foreground should remain sharp, and a static
+  lower scene should remain visually unchanged.
+- Set maximum blur to zero and resize the window. Check that the gradient
+  remains attached to the full image or panel rather than its visible clip.
+- Repeat at fractional display scaling; inspect edges for seams or halos.
+
+Compilation and automated rendering tests do not establish smooth animation,
+visual quality, or interactive frame time on a particular device.
+
+`cargo run --package native_blur` still opens the original uniform image blur,
+same-source glass, modal backdrop, and toast example.
+
 ## Extras
 A bunch of simpler examples exist:
 

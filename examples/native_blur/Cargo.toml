@@ -3,6 +3,7 @@ name = "native_blur"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "native_blur"
 
 [dependencies]
 iced.workspace = true

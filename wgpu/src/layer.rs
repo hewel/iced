@@ -16,7 +16,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug)]
 pub struct Layer {
     pub bounds: Rectangle,
-    pub backdrop_blur: Option<f32>,
+    pub backdrop_blur: Option<renderer::Backdrop>,
     pub quads: quad::Batch,
     pub triangles: triangle::Batch,
     pub primitives: primitive::Batch,
@@ -183,7 +183,7 @@ impl Layer {
         clip_bounds: Rectangle,
         transformation: Transformation,
     ) {
-        image.blur = normalize_blur(image.blur);
+        image.blur = image.blur.normalized();
         self.draw_raster_transformed(image, bounds, clip_bounds, transformation);
     }
 
@@ -208,7 +208,7 @@ impl Layer {
             <[f32; 4]>::from(image.border_radius).map(|radius| scale_length(radius, scale));
         let image = Image::Raster {
             image: core::Image {
-                blur: scale_length(image.blur, scale),
+                blur: image.blur.scaled(scale),
                 border_radius: core::border::Radius {
                     top_left,
                     top_right,
@@ -470,13 +470,5 @@ fn finite_color(color: Color) -> Color {
         g: graphics::shape::normalize_smoothing(color.g),
         b: graphics::shape::normalize_smoothing(color.b),
         a: graphics::shape::normalize_smoothing(color.a),
-    }
-}
-
-pub(crate) fn normalize_blur(radius: f32) -> f32 {
-    if radius.is_nan() || radius <= 0.0 {
-        0.0
-    } else {
-        radius.min(128.0)
     }
 }

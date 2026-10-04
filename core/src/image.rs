@@ -1,6 +1,6 @@
 //! Load and draw raster graphics.
 use crate::border;
-use crate::{Bytes, Radians, Rectangle, Size};
+use crate::{Blur, Bytes, Radians, Rectangle, Size};
 
 use rustc_hash::FxHasher;
 
@@ -42,18 +42,20 @@ pub struct Image<H = Handle> {
     /// 0 means transparent. 1 means opaque.
     pub opacity: f32,
 
-    /// Approximate Gaussian sigma in logical pixels, applied before masking.
+    /// Approximate Gaussian sigma profile in logical pixels, applied before masking.
     ///
     /// Non-positive values and NaN are sharp. Positive values (including
     /// infinity) clamp to 128. The full cropped rendition is blurred, not
     /// merely its visible clipping region.
-    pub blur: f32,
+    pub blur: Blur,
 }
 
 impl Image<Handle> {
-    /// Sets the blur sigma in logical pixels. See [`Self::blur`].
-    pub fn blur(mut self, sigma: f32) -> Self {
-        self.blur = sigma;
+    /// Sets a uniform or progressive blur profile. A scalar sets uniform sigma.
+    ///
+    /// Gradients follow the full cropped content before rotation and masking.
+    pub fn blur(mut self, blur: impl Into<Blur>) -> Self {
+        self.blur = blur.into();
         self
     }
 
@@ -97,7 +99,7 @@ impl Image<Handle> {
             snap: crate::renderer::CRISP,
             crop: None,
             opacity: 1.0,
-            blur: 0.0,
+            blur: Blur::default(),
         }
     }
 

@@ -6,6 +6,9 @@ mod atlas;
 #[cfg(feature = "image")]
 mod raster;
 
+#[cfg(feature = "image")]
+mod progressive;
+
 #[cfg(feature = "svg")]
 mod vector;
 
@@ -26,7 +29,7 @@ pub type Batch = Vec<Image>;
 pub fn needs_streaming(images: &[Image]) -> bool {
     images
         .iter()
-        .any(|image| matches!(image, Image::Raster { image, .. } if image.blur > 0.0))
+        .any(|image| matches!(image, Image::Raster { image, .. } if image.blur.maximum() > 0.0))
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +197,8 @@ pub struct State {
     blurred: Vec<(u64, crate::blur::Target)>,
     scratch: Vec<crate::blur::Target>,
     retired: Vec<crate::blur::Target>,
+    #[cfg(feature = "image")]
+    progressive: progressive::State,
     pub image_hits: u64,
     pub image_misses: u64,
 }
@@ -213,6 +218,7 @@ impl State {
         images: &[Image],
         transformation: Transformation,
         scale: f32,
+        _visible_bounds: Rectangle,
     ) {
         if self.layers.len() <= self.prepare_layer {
             self.layers.push(Layer::new(
@@ -226,9 +232,9 @@ impl State {
         let layer = &mut self.layers[self.prepare_layer];
 
         if self.blur.is_none()
-            && images
-                .iter()
-                .any(|image| matches!(image, Image::Raster { image, .. } if image.blur > 0.0))
+            && images.iter().any(
+                |image| matches!(image, Image::Raster { image, .. } if image.blur.maximum() > 0.0),
+            )
         {
             self.blur = Some(crate::blur::Pipeline::new(device, pipeline.format));
         }
@@ -267,9 +273,32 @@ impl State {
                             _ => {}
                         }
 
-                        if image.blur > 0.0 {
+                        let profile = image.blur;
+                        if matches!(profile, crate::core::Blur::Linear(_)) {
+                            layer.push(bind_group, &self.nearest_instances, &self.linear_instances);
+                            let (hits, misses) = self.progressive.prepare(
+                                pipeline,
+                                blur.expect("image blur pipeline"),
+                                device,
+                                encoder,
+                                belt,
+                                image,
+                                bounds,
+                                clip_bounds,
+                                _visible_bounds,
+                                scale,
+                                revision,
+                                atlas_entry,
+                                bind_group,
+                                layer,
+                                &self.nearest_instances,
+                                &mut self.linear_instances,
+                            );
+                            self.image_hits += hits;
+                            self.image_misses += misses;
+                        } else if profile.maximum() > 0.0 {
                             let blur = blur.expect("image blur pipeline");
-                            let sigma = image.blur * scale;
+                            let sigma = profile.maximum() * scale;
                             let size =
                                 crate::blur::rendition_size([bounds.width, bounds.height], sigma);
                             let key = crate::blur::fingerprint(&(
@@ -589,7 +618,8 @@ impl State {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.blurred
+        let bytes = self
+            .blurred
             .iter()
             .map(|(_, target)| target.bytes())
             .sum::<usize>()
@@ -602,7 +632,10 @@ impl State {
                 .retired
                 .iter()
                 .map(crate::blur::Target::bytes)
-                .sum::<usize>()
+                .sum::<usize>();
+        #[cfg(feature = "image")]
+        let bytes = bytes + self.progressive.bytes();
+        bytes
     }
 }
 

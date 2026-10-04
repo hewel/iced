@@ -398,7 +398,7 @@ impl geometry::frame::Backend for Frame {
             .0
             .m11
             .hypot(self.transforms.current.0.m12);
-        image.blur = crate::layer::normalize_blur(image.blur) * blur_scale;
+        image.blur = image.blur.normalized().scaled(blur_scale);
         image.border_radius = core::border::Radius {
             top_left: scale_radius(image.border_radius.top_left),
             top_right: scale_radius(image.border_radius.top_right),

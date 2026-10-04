@@ -464,7 +464,7 @@ impl Engine {
                     _pixels,
                     _clip_mask,
                     clip_bounds,
-                    image.blur * scale.abs(),
+                    image.blur.scaled(scale.abs()),
                 );
             }
             #[cfg(feature = "svg")]

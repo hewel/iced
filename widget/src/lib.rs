@@ -19,6 +19,7 @@ mod responsive;
 mod stack;
 mod themer;
 
+pub mod backdrop;
 pub mod button;
 pub mod checkbox;
 pub mod combo_box;
@@ -51,9 +52,12 @@ pub mod vertical_slider;
 
 mod helpers;
 
+pub use backdrop::backdrop;
 pub use helpers::*;
 pub use modal::modal;
 
+#[doc(no_inline)]
+pub use backdrop::Backdrop;
 #[doc(no_inline)]
 pub use button::Button;
 #[doc(no_inline)]

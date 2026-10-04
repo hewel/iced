@@ -407,6 +407,9 @@ impl Renderer {
                     &layer.images,
                     viewport.projection(),
                     scale_factor,
+                    physical_bounds
+                        .intersection(&(layer.bounds * scale_factor))
+                        .unwrap(),
                 );
 
                 prepare_span.finish();
@@ -515,14 +518,23 @@ impl Renderer {
         let scale = Transformation::scale(scale_factor);
 
         for layer in self.layers.iter() {
-            if let Some(radius) = layer.backdrop_blur {
+            if let Some(mut backdrop) = layer.backdrop_blur {
                 let _ = ManuallyDrop::into_inner(render_pass);
-                prefix = blur::fingerprint(&(prefix, radius));
+                backdrop.bounds = if backdrop.bounds == Rectangle::INFINITE {
+                    physical_bounds
+                } else {
+                    backdrop.bounds * scale_factor
+                };
+                backdrop.blur = backdrop.blur.scaled(scale_factor);
+                backdrop.border_radius = backdrop.border_radius * scale_factor;
+                let clip = layer.bounds * scale_factor;
+                prefix = blur::fingerprint(&(prefix, backdrop, clip));
                 self.scene_blur.as_mut().unwrap().apply(
                     &self.engine.device,
                     encoder,
                     cacheable.then_some(prefix),
-                    radius * scale_factor,
+                    backdrop,
+                    clip,
                 );
                 render_pass =
                     ManuallyDrop::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -706,6 +718,7 @@ impl Renderer {
                             std::slice::from_ref(image),
                             viewport.projection(),
                             scale_factor,
+                            physical_bounds,
                         );
                         {
                             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -842,13 +855,51 @@ impl Renderer {
 }
 
 impl core::Renderer for Renderer {
-    fn blur_backdrop(&mut self, radius: f32) {
-        let radius = layer::normalize_blur(radius);
-        if radius == 0.0 {
+    fn blur_backdrop(&mut self, blur: impl Into<core::Blur>) {
+        let blur = blur.into().normalized();
+        if blur.maximum() == 0.0 {
             return;
         }
         let (layer, transformation) = self.layers.barrier();
-        layer.backdrop_blur = Some(radius * transformation.scale_factor());
+        layer.backdrop_blur = Some(core::renderer::Backdrop {
+            bounds: layer.bounds,
+            blur: blur.scaled(transformation.scale_factor()),
+            border_radius: core::border::Radius::default(),
+            border_smoothing: 0.0,
+        });
+    }
+
+    fn draw_backdrop(&mut self, mut backdrop: core::renderer::Backdrop) {
+        backdrop.blur = backdrop.blur.normalized();
+        if backdrop.blur.maximum() == 0.0
+            || !backdrop.bounds.x.is_finite()
+            || !backdrop.bounds.y.is_finite()
+            || !backdrop.bounds.width.is_finite()
+            || !backdrop.bounds.height.is_finite()
+            || backdrop.bounds.width <= 0.0
+            || backdrop.bounds.height <= 0.0
+        {
+            return;
+        }
+        let (layer, transformation) = self.layers.barrier();
+        let scale = transformation.scale_factor();
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        backdrop.bounds = backdrop.bounds * transformation;
+        backdrop.blur = backdrop.blur.scaled(scale);
+        let [top_left, top_right, bottom_right, bottom_left] =
+            <[f32; 4]>::from(backdrop.border_radius).map(|radius| {
+                graphics::shape::normalize_length(radius).min(f32::MAX / scale) * scale
+            });
+        backdrop.border_radius = core::border::Radius {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        };
+        backdrop.border_smoothing = graphics::shape::normalize_smoothing(backdrop.border_smoothing);
+        layer.backdrop_blur = Some(backdrop);
     }
 
     fn blur_statistics(&self) -> core::renderer::BlurStatistics {

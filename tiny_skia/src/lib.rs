@@ -117,15 +117,23 @@ impl Renderer {
                     continue;
                 };
 
-                if let Some(radius) = layer.backdrop_blur {
+                engine::adjust_clip_mask(clip_mask, layer_bounds);
+                if let Some(backdrop) = layer.backdrop_blur {
                     self.scene_blur.apply(
                         pixels,
+                        clip_mask,
                         layer_bounds,
-                        radius * scale_factor,
-                        scale_factor,
+                        renderer::Backdrop {
+                            bounds: backdrop.bounds * scale_factor,
+                            blur: backdrop.blur.scaled(scale_factor),
+                            border_radius: engine::scaled_radius(
+                                backdrop.border_radius,
+                                scale_factor,
+                            ),
+                            ..backdrop
+                        },
                     );
                 }
-                engine::adjust_clip_mask(clip_mask, layer_bounds);
 
                 if !layer.quads.is_empty() {
                     let render_span = debug::render(debug::Primitive::Quad);
@@ -211,11 +219,32 @@ impl Renderer {
 }
 
 impl core::Renderer for Renderer {
-    fn blur_backdrop(&mut self, radius: f32) {
-        let radius = blur::radius(radius);
-        if radius > 0.0 {
+    fn blur_backdrop(&mut self, blur: impl Into<core::Blur>) {
+        let blur = blur.into().normalized();
+        if blur.maximum() > 0.0 {
             let (layer, transformation) = self.layers.barrier();
-            layer.backdrop_blur = Some(radius * transformation.scale_factor().abs());
+            layer.backdrop_blur = Some(renderer::Backdrop {
+                bounds: layer.bounds,
+                blur: blur.scaled(transformation.scale_factor().abs()),
+                border_radius: 0.0.into(),
+                border_smoothing: 0.0,
+            });
+        }
+    }
+
+    fn draw_backdrop(&mut self, backdrop: renderer::Backdrop) {
+        let blur = backdrop.blur.normalized();
+        if blur.maximum() > 0.0 {
+            let (layer, transformation) = self.layers.barrier();
+            layer.backdrop_blur = Some(renderer::Backdrop {
+                bounds: backdrop.bounds * transformation,
+                blur: blur.scaled(transformation.scale_factor().abs()),
+                border_radius: engine::scaled_radius(
+                    backdrop.border_radius,
+                    transformation.scale_factor(),
+                ),
+                ..backdrop
+            });
         }
     }
 

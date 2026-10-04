@@ -38,8 +38,13 @@ where
     A: core::Renderer,
     B: core::Renderer,
 {
-    fn blur_backdrop(&mut self, radius: f32) {
-        delegate!(self, renderer, renderer.blur_backdrop(radius));
+    fn blur_backdrop(&mut self, blur: impl Into<core::Blur>) {
+        let blur = blur.into();
+        delegate!(self, renderer, renderer.blur_backdrop(blur));
+    }
+
+    fn draw_backdrop(&mut self, backdrop: core::renderer::Backdrop) {
+        delegate!(self, renderer, renderer.draw_backdrop(backdrop));
     }
 
     fn blur_statistics(&self) -> renderer::BlurStatistics {

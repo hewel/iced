@@ -13,7 +13,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub bounds: Rectangle,
-    pub backdrop_blur: Option<f32>,
+    pub backdrop_blur: Option<core::renderer::Backdrop>,
     pub quads: Vec<(Quad, Background)>,
     pub primitives: Vec<Item<Primitive>>,
     pub images: Vec<Image>,
@@ -160,7 +160,7 @@ impl Layer {
         clip_bounds: Rectangle,
         transformation: Transformation,
     ) {
-        image.blur = crate::blur::radius(image.blur);
+        image.blur = image.blur.normalized();
         self.draw_raster_transformed(image, bounds, clip_bounds, transformation);
     }
 
@@ -173,7 +173,7 @@ impl Layer {
     ) {
         let image = Image::Raster {
             image: core::Image {
-                blur: image.blur * transformation.scale_factor().abs(),
+                blur: image.blur.scaled(transformation.scale_factor().abs()),
                 border_radius: crate::engine::scaled_radius(
                     image.border_radius,
                     transformation.scale_factor(),
@@ -230,7 +230,7 @@ impl Layer {
     }
 
     pub fn damage(previous: &Self, current: &Self, scale_factor: f32) -> Vec<Rectangle> {
-        if previous.bounds != current.bounds {
+        if previous.bounds != current.bounds || previous.backdrop_blur != current.backdrop_blur {
             return vec![previous.bounds, current.bounds];
         }
 

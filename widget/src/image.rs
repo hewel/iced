@@ -25,7 +25,9 @@ use crate::core::layout;
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::widget::{Meta, Tree};
-use crate::core::{ContentFit, Layout, Length, Point, Rectangle, Rotation, Size, Vector, Widget};
+use crate::core::{
+    Blur, ContentFit, Layout, Length, Point, Rectangle, Rotation, Size, Vector, Widget,
+};
 
 pub use image::{FilterMethod, Handle};
 
@@ -67,7 +69,7 @@ pub struct Image<Handle = image::Handle> {
     scale: f32,
     expand: bool,
     snap: bool,
-    blur: f32,
+    blur: Blur,
     display_frame: Option<Rectangle>,
     visible_region: Option<Rectangle>,
     mask_frame: Option<Rectangle>,
@@ -91,7 +93,7 @@ impl<Handle> Image<Handle> {
             scale: 1.0,
             expand: false,
             snap: renderer::CRISP,
-            blur: 0.0,
+            blur: Blur::default(),
             display_frame: None,
             visible_region: None,
             mask_frame: None,
@@ -99,12 +101,18 @@ impl<Handle> Image<Handle> {
         }
     }
 
-    /// Blurs the complete cropped image before applying its rounded mask.
+    /// Blurs this image before applying its rounded mask.
     ///
-    /// `sigma` is in logical pixels; NaN and non-positive values are sharp,
-    /// and positive values clamp to 128.
-    pub fn blur(mut self, sigma: f32) -> Self {
-        self.blur = sigma;
+    /// Accepts a uniform sigma in logical pixels or a progressive [`Blur`] profile.
+    /// NaN and non-positive radii are sharp; positive values clamp to 128.
+    /// Profiles follow the full cropped image before rotation, including portions
+    /// outside the visible region. Cropping changes that reference image, while
+    /// clipping does not. Image rotation rotates the profile with it.
+    ///
+    /// This samples the image itself. Use [`crate::backdrop()`] to blur the
+    /// previously drawn scene behind foreground content.
+    pub fn blur(mut self, blur: impl Into<Blur>) -> Self {
+        self.blur = blur.into();
         self
     }
 
@@ -379,7 +387,7 @@ pub fn draw<Renderer, Handle>(
     opacity: f32,
     scale: f32,
     snap: bool,
-    blur: f32,
+    blur: impl Into<Blur>,
     mask_frame: Option<Rectangle>,
 ) where
     Renderer: image::Renderer<Handle = Handle>,
@@ -402,7 +410,7 @@ pub fn draw<Renderer, Handle>(
             filter_method,
             rotation: rotation.radians(),
             opacity,
-            blur,
+            blur: blur.into(),
         },
         drawing_bounds,
         mask_frame.unwrap_or(bounds),

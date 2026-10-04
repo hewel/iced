@@ -528,15 +528,16 @@ pub mod advanced;
 
 pub use crate::core::alignment;
 pub use crate::core::animation;
+pub use crate::core::blur;
 pub use crate::core::border;
 pub use crate::core::color;
 pub use crate::core::gradient;
 pub use crate::core::padding;
 pub use crate::core::theme;
 pub use crate::core::{
-    Alignment, Animation, Background, Border, Code, Color, ContentFit, Degrees, Function, Gradient,
-    Length, Never, Padding, Pixels, Point, Radians, Rectangle, Rotation, Settings, Shadow, Size,
-    Theme, Transformation, Vector, never,
+    Alignment, Animation, Background, Blur, Border, Code, Color, ContentFit, Degrees, Function,
+    Gradient, Length, Never, Padding, Pixels, Point, Radians, Rectangle, Rotation, Settings,
+    Shadow, Size, Theme, Transformation, Vector, never,
 };
 pub use crate::program::Preset;
 pub use crate::program::message;

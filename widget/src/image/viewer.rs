@@ -7,7 +7,7 @@ use crate::core::renderer;
 use crate::core::widget::Meta;
 use crate::core::widget::tree::{self, Tree};
 use crate::core::{
-    ContentFit, Event, Image, Layout, Length, Pixels, Point, Radians, Rectangle, Shell, Size,
+    Blur, ContentFit, Event, Image, Layout, Length, Pixels, Point, Radians, Rectangle, Shell, Size,
     Vector, Widget,
 };
 
@@ -22,7 +22,7 @@ pub struct Viewer<Handle> {
     handle: Handle,
     filter_method: FilterMethod,
     content_fit: ContentFit,
-    blur: f32,
+    blur: Blur,
 }
 
 impl<Handle> Viewer<Handle> {
@@ -38,15 +38,18 @@ impl<Handle> Viewer<Handle> {
             scale_step: 0.10,
             filter_method: FilterMethod::default(),
             content_fit: ContentFit::default(),
-            blur: 0.0,
+            blur: Blur::default(),
         }
     }
 
-    /// Sets approximate Gaussian sigma in logical pixels, before clipping.
+    /// Blurs the viewed image before clipping.
     ///
-    /// Non-positive values and NaN are sharp; positive values clamp to 128.
-    pub fn blur(mut self, sigma: f32) -> Self {
-        self.blur = sigma;
+    /// Accepts a uniform sigma in logical pixels or a progressive [`Blur`] profile.
+    /// The profile follows the full image as it is panned and zoomed; clipping
+    /// does not restart the transition. Non-positive radii and NaN are sharp;
+    /// positive values clamp to 128. This samples the image, not the lower scene.
+    pub fn blur(mut self, blur: impl Into<Blur>) -> Self {
+        self.blur = blur.into();
         self
     }
 

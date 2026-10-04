@@ -7,7 +7,9 @@ use crate::text::{self, Text};
 use crate::{Background, Color, Font, Pixels, Point, Rectangle, Size, Transformation};
 
 impl Renderer for () {
-    fn blur_backdrop(&mut self, _radius: f32) {}
+    fn blur_backdrop(&mut self, _blur: impl Into<crate::Blur>) {}
+
+    fn draw_backdrop(&mut self, _backdrop: crate::renderer::Backdrop) {}
 
     fn start_layer(&mut self, _bounds: Rectangle) {}
 

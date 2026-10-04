@@ -16,11 +16,19 @@ pub const CRISP: bool = cfg!(feature = "crisp");
 pub trait Renderer: 'static {
     /// Blurs everything recorded before this point within the current clip.
     ///
-    /// Later drawing remains crisp. `radius` is approximate Gaussian sigma in
+    /// Later drawing remains crisp. The profile uses approximate Gaussian sigma in
     /// logical pixels; NaN and non-positive values do nothing, and positive
     /// values including infinity clamp to 128. This is an ordering barrier,
-    /// not a scope: it has no matching end operation.
-    fn blur_backdrop(&mut self, radius: f32);
+    /// not a scope: it has no matching end operation. A gradient spans the
+    /// current clip; use [`Self::draw_backdrop`] for an independent profile frame.
+    fn blur_backdrop(&mut self, blur: impl Into<crate::Blur>);
+
+    /// Blurs the previously drawn scene inside a rounded region.
+    ///
+    /// The profile follows the complete `bounds`, even when clipped. Sampling
+    /// may extend outside the region; pixels outside its mask remain unchanged.
+    /// Subsequent drawing, including the region's foreground, remains sharp.
+    fn draw_backdrop(&mut self, backdrop: Backdrop);
 
     /// Returns cumulative blur cache counters and current resident allocation.
     fn blur_statistics(&self) -> BlurStatistics {
@@ -107,6 +115,19 @@ pub trait Renderer: 'static {
     ///
     /// By default, it does nothing.
     fn tick(&mut self) {}
+}
+
+/// A rounded region of the live lower scene to blur before drawing foreground.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Backdrop {
+    /// Logical effect bounds and the blur profile's reference frame.
+    pub bounds: Rectangle,
+    /// Uniform or progressive sigma in logical pixels.
+    pub blur: crate::Blur,
+    /// Corner radii of the effect mask.
+    pub border_radius: crate::border::Radius,
+    /// Corner smoothing of the effect mask, normalized to `0..=1`.
+    pub border_smoothing: f32,
 }
 
 /// Cumulative blur cache activity and current resident blur memory.
