@@ -3,7 +3,7 @@
 //! # Example
 //! ```no_run
 //! # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
-//! # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+//! # use iced::widget::Widget;
 //! #
 //! use iced::widget::text_editor;
 //!
@@ -16,11 +16,10 @@
 //!     Edit(text_editor::Action)
 //! }
 //!
-//! fn view(state: &State) -> Element<'_, Message> {
+//! fn view(state: &State) -> impl Widget<Message> {
 //!     text_editor(&state.content)
 //!         .placeholder("Type something here...")
 //!         .on_action(Message::Edit)
-//!         .into()
 //! }
 //!
 //! fn update(state: &mut State, message: Message) {
@@ -34,7 +33,6 @@
 use crate::core::alignment;
 use crate::core::clipboard;
 use crate::core::layout::{self, Layout};
-use crate::core::length;
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::text::editor::{self, Editor as _};
@@ -45,8 +43,7 @@ use crate::core::theme;
 use crate::core::widget::{self, Widget};
 use crate::core::window;
 use crate::core::{
-    Background, Border, Color, Element, Event, Font, Length, Padding, Pixels, Rectangle, Shell,
-    Size, Theme,
+    Background, Border, Color, Event, Font, Length, Padding, Pixels, Rectangle, Shell, Size, Theme,
 };
 
 use std::borrow::Cow;
@@ -64,7 +61,7 @@ pub use text::editor::{
 /// # Example
 /// ```no_run
 /// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
-/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+/// # use iced::widget::Widget;
 /// #
 /// use iced::widget::text_editor;
 ///
@@ -77,11 +74,10 @@ pub use text::editor::{
 ///     Edit(text_editor::Action)
 /// }
 ///
-/// fn view(state: &State) -> Element<'_, Message> {
+/// fn view(state: &State) -> impl Widget<Message> {
 ///     text_editor(&state.content)
 ///         .placeholder("Type something here...")
 ///         .on_action(Message::Edit)
-///         .into()
 /// }
 ///
 /// fn update(state: &mut State, message: Message) {
@@ -152,7 +148,7 @@ where
     ///
     /// ```no_run
     /// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
-    /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+    /// # use iced::widget::Widget;
     /// #
     /// use iced::color;
     /// use iced::widget::text;
@@ -163,10 +159,9 @@ where
     ///    content: text_editor::Content,
     /// }
     ///
-    /// fn view(state: &State) -> Element<'_, ()> {
+    /// fn view(state: &State) -> impl Widget<()> {
     ///     text_editor(&state.content)
     ///         .highlight("rust")
-    ///         .into()
     /// }
     /// ```
     #[cfg(feature = "highlighter")]
@@ -321,6 +316,15 @@ struct State<Parser: text::Parser> {
     last_theme: RefCell<Option<String>>,
 }
 
+impl<Parser, Message, Theme, Renderer> widget::Meta
+    for TextEditor<'_, Parser, Message, Theme, Renderer>
+where
+    Parser: text::Parser,
+    Theme: Catalog,
+    Renderer: text::Renderer,
+{
+}
+
 impl<Parser, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for TextEditor<'_, Parser, Message, Theme, Renderer>
 where
@@ -348,12 +352,7 @@ where
         }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> iced_renderer::core::layout::Node {
+    fn layout(&mut self, tree: &mut widget::Tree, renderer: &Renderer, limits: &layout::Limits) {
         let mut internal = self.content.0.borrow_mut();
         let state = tree.state.downcast_mut::<State<Parser>>();
 
@@ -363,10 +362,13 @@ where
             state.parser_settings = self.parser_settings.clone();
         }
 
-        let limits = limits.width(self.width).height(self.height);
+        let limits = limits
+            .width(self.width)
+            .height(self.height)
+            .shrink(self.padding);
 
         internal.editor.update(
-            limits.shrink(self.padding).max(),
+            limits.bounds(),
             self.font.unwrap_or_else(|| renderer.font()),
             self.text_size.unwrap_or_else(|| renderer.text_size()),
             self.line_height.unwrap_or_else(|| renderer.line_height()),
@@ -376,35 +378,16 @@ where
             state.parser.borrow_mut().deref_mut(),
         );
 
-        match self.height {
-            Length::Shrink
-            | Length::Fit
-            | Length::Bounded {
-                sizing: length::Sizing::Fit | length::Sizing::Shrink,
-                ..
-            } => {
-                let min_bounds = internal.editor.min_bounds();
+        let bounds = limits.resolve(self.width, self.height, internal.editor.min_bounds());
 
-                layout::Node::new(
-                    limits
-                        .height(min_bounds.height)
-                        .max()
-                        .expand(Size::new(0.0, self.padding.y())),
-                )
-            }
-            Length::Fill
-            | Length::FillPortion(_)
-            | Length::Fixed(_)
-            | Length::Bounded { .. }
-            | Length::Fluid(_) => layout::Node::new(limits.max()),
-        }
+        tree.size = bounds.expand(self.padding);
     }
 
     fn update(
         &mut self,
         tree: &mut widget::Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -427,6 +410,7 @@ where
             match update {
                 editor::Update::Action(action) => {
                     shell.publish(on_edit(action));
+                    shell.capture_event();
                 }
                 editor::Update::Release => {}
                 editor::Update::Custom(message) => {
@@ -502,7 +486,7 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         _defaults: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
@@ -586,7 +570,7 @@ where
     fn mouse_interaction(
         &self,
         _tree: &widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &Renderer,
@@ -607,7 +591,8 @@ where
     fn operate(
         &mut self,
         tree: &mut widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        _viewport: &Rectangle,
         _renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
@@ -619,19 +604,6 @@ where
             layout.bounds(),
             &mut self.content.0.borrow_mut().editor,
         );
-    }
-}
-
-impl<'a, Parser, Message, Theme, Renderer> From<TextEditor<'a, Parser, Message, Theme, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
-where
-    Parser: text::Parser,
-    Message: 'a,
-    Theme: Catalog + 'a,
-    Renderer: text::Renderer,
-{
-    fn from(text_editor: TextEditor<'a, Parser, Message, Theme, Renderer>) -> Self {
-        Self::new(text_editor)
     }
 }
 
@@ -822,7 +794,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
     let palette = theme.palette();
 
     let active = Style {
-        background: Background::Color(palette.background.base.color),
+        background: Background::Color(palette.background.weakest.color),
         border: Border {
             radius: 2.0.into(),
             smoothing: 0.0,
@@ -830,8 +802,8 @@ pub fn default(theme: &Theme, status: Status) -> Style {
             color: palette.background.strong.color,
         },
         placeholder: palette.secondary.base.color,
-        value: palette.background.base.text,
-        selection: palette.primary.weak.color,
+        value: palette.background.weakest.text,
+        selection: palette.background.strongest.color,
     };
 
     match status {
@@ -851,7 +823,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
             ..active
         },
         Status::Disabled => Style {
-            background: Background::Color(palette.background.weak.color),
+            background: Background::Color(palette.background.base.color),
             value: active.placeholder,
             placeholder: palette.background.strongest.color,
             ..active

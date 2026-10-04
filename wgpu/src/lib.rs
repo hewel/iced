@@ -190,7 +190,11 @@ impl Renderer {
 
         self.staging_belt.finish();
         let submission = {
-            let _guard = self.engine.queue_synchronization.as_deref().map(QueueGuard::acquire);
+            let _guard = self
+                .engine
+                .queue_synchronization
+                .as_deref()
+                .map(QueueGuard::acquire);
             self.engine.queue.submit([encoder.finish()])
         };
         self.staging_belt.recall();
@@ -284,7 +288,11 @@ impl Renderer {
 
         self.staging_belt.finish();
         let index = {
-            let _guard = self.engine.queue_synchronization.as_deref().map(QueueGuard::acquire);
+            let _guard = self
+                .engine
+                .queue_synchronization
+                .as_deref()
+                .map(QueueGuard::acquire);
             self.engine.queue.submit([encoder.finish()])
         };
         self.staging_belt.recall();

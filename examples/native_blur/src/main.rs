@@ -6,7 +6,7 @@ use iced::widget::{
     button, center, column, container, image, modal, mouse_area, opaque, pin, row, scrollable,
     slider, stack, text, text_input,
 };
-use iced::{Color, ContentFit, Element, Fill, Rectangle, Subscription};
+use iced::{Color, ContentFit, Fill, Rectangle, Subscription, Widget};
 use std::time::Duration;
 
 const WIDTH: f32 = 640.0;
@@ -105,7 +105,7 @@ impl App {
             .border_smoothing(0.6)
     }
 
-    fn glass_button(&self, x: f32, label: &'static str) -> Element<'_, Message> {
+    fn glass_button(&self, x: f32, label: &'static str) -> impl Widget<Message> {
         let glass = self
             .art()
             .width(160)
@@ -139,7 +139,6 @@ impl App {
         ])
         .x(x)
         .y(240)
-        .into()
     }
 
     fn fade() -> iced::gradient::Linear {
@@ -148,7 +147,7 @@ impl App {
             .add_stop(1.0, Color::from_rgba(0.02, 0.03, 0.07, 0.8))
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> {
         let fade = Self::fade();
         let hero = stack![
             self.art().tint(fade),
@@ -240,7 +239,7 @@ impl App {
                 }))
                 .on_press(Message::Close),
             );
-            layers = layers.push(modal(self.sigma, scrim));
+            layers = layers.push(modal(self.sigma, scrim).boxed());
         }
         if self.toast {
             layers = layers.push(
@@ -256,9 +255,10 @@ impl App {
                     .style(container::rounded_box),
                 ))
                 .x(24)
-                .y(12),
+                .y(12)
+                .boxed(),
             );
         }
-        container(layers).width(Fill).height(Fill).into()
+        container(layers).width(Fill).height(Fill)
     }
 }

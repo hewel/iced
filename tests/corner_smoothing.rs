@@ -662,9 +662,8 @@ fn widget_crop_fitting_and_rotation_match_precropped_image() {
                             height: 12,
                         });
                     }
-                    let element: iced::Element<'_, (), iced::Theme, iced::Renderer> = image.into();
-                    let mut interface = iced_runtime::UserInterface::build(
-                        element,
+                    let mut interface = iced_runtime::UserInterface::<(), _, _>::build(
+                        image,
                         Size::new(96.0, 80.0),
                         Default::default(),
                         &mut renderer,

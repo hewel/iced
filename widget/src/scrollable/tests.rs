@@ -7,7 +7,7 @@ fn close(actual: f32, expected: f32) {
     );
 }
 
-fn geometry(size: f32) -> (Rectangle, Rectangle) {
+fn geometry(size: f32) -> (Rectangle, Size) {
     (
         Rectangle {
             x: -40.0,
@@ -15,11 +15,7 @@ fn geometry(size: f32) -> (Rectangle, Rectangle) {
             width: size,
             height: size,
         },
-        Rectangle {
-            width: 1_000_000.0,
-            height: 2_000_000.0,
-            ..Rectangle::default()
-        },
+        Size::new(1_000_000.0, 2_000_000.0),
     )
 }
 
@@ -30,18 +26,47 @@ fn both(scrollbar: Scrollbar) -> Direction {
     }
 }
 
+fn snap(state: &mut State, x: f32, y: f32, bounds: Rectangle, content: Size) {
+    state.snap_to(
+        RelativeOffset {
+            x: Some(x),
+            y: Some(y),
+        },
+        Animation::Instant,
+        bounds,
+        content,
+        Source::Operation,
+    );
+}
+
+fn bars(state: &State, direction: Direction, bounds: Rectangle, content: Size) -> Scrollbars {
+    Scrollbars::new(
+        state.translation(direction, bounds, content),
+        direction,
+        bounds,
+        content,
+    )
+}
+
+fn grab(scrollbars: &Scrollbars, axis: Axis, cursor: Point) -> f32 {
+    let (_, Hit::Scroller { grabbed_at }) = scrollbars.hit(axis, cursor).unwrap() else {
+        panic!("expected a scroller grab at {cursor:?}");
+    };
+    grabbed_at
+}
+
 #[test]
 fn minimum_thumb_length_stays_inside_each_track() {
     for size in [0.0, 10.0, 32.0, 46.0, 300.0] {
         let (bounds, content) = geometry(size);
-        let bars = Scrollbars::new(&State::new(), both(Scrollbar::new()), bounds, content);
-        for (bar, horizontal) in [(bars.x.unwrap(), true), (bars.y.unwrap(), false)] {
+        let bars = bars(&State::new(), both(Scrollbar::new()), bounds, content);
+        for axis in [Axis::X, Axis::Y] {
+            let bar = bars.scrollbar(axis).unwrap();
             let thumb = bar.scroller.unwrap().bounds;
-            let (start, length, track_start, track_length) = if horizontal {
-                (thumb.x, thumb.width, bar.bounds.x, bar.bounds.width)
-            } else {
-                (thumb.y, thumb.height, bar.bounds.y, bar.bounds.height)
-            };
+            let start = axis.coordinate(thumb.position());
+            let length = axis.length(thumb);
+            let track_start = axis.coordinate(bar.bounds.position());
+            let track_length = axis.length(bar.bounds);
             close(length, track_length.min(32.0));
             assert!(start >= track_start && start + length <= track_start + track_length);
         }
@@ -59,78 +84,45 @@ fn dragging_round_trips_and_reaches_both_ends() {
             both(configuration),
         ] {
             let mut state = State::new();
-            state.snap_to(RelativeOffset {
-                x: Some(0.37),
-                y: Some(0.61),
-            });
-            let bars = Scrollbars::new(&state, direction, bounds, content);
-            for (bar, horizontal, initial) in [(bars.x, true, 0.37), (bars.y, false, 0.61)] {
-                let Some(bar) = bar else { continue };
+            snap(&mut state, 0.37, 0.61, bounds, content);
+            let scrollbars = bars(&state, direction, bounds, content);
+            for (axis, initial) in [(Axis::X, 0.37), (Axis::Y, 0.61)] {
+                let Some(bar) = scrollbars.scrollbar(axis) else {
+                    continue;
+                };
                 let thumb = bar.scroller.unwrap().bounds;
                 let grabbed_at = 0.23;
                 let cursor = Point::new(
                     thumb.x + thumb.width * grabbed_at,
                     thumb.y + thumb.height * grabbed_at,
                 );
-                let grab = if horizontal {
-                    bars.grab_x_scroller(cursor)
-                } else {
-                    bars.grab_y_scroller(cursor)
-                }
-                .unwrap();
-                close(grab, grabbed_at);
-                let percentage = if horizontal {
-                    bar.scroll_percentage_x(grab, cursor)
-                } else {
-                    bar.scroll_percentage_y(grab, cursor)
-                }
-                .unwrap();
-                close(percentage, initial);
+                let grabbed_at = grab(&scrollbars, axis, cursor);
+                close(grabbed_at, 0.23);
+                close(
+                    bar.scroll_percentage(axis, grabbed_at, cursor).unwrap(),
+                    initial,
+                );
                 for physical in [1.0, 0.0, 0.72, 0.18, 1.0, 0.0] {
-                    let cursor = if horizontal {
-                        Point::new(
-                            bar.bounds.x
-                                + physical * (bar.bounds.width - thumb.width)
-                                + grab * thumb.width,
-                            cursor.y,
-                        )
-                    } else {
-                        Point::new(
-                            cursor.x,
-                            bar.bounds.y
-                                + physical * (bar.bounds.height - thumb.height)
-                                + grab * thumb.height,
-                        )
-                    };
-                    let percentage = if horizontal {
-                        bar.scroll_percentage_x(grab, cursor)
-                    } else {
-                        bar.scroll_percentage_y(grab, cursor)
-                    }
-                    .unwrap();
+                    let position = axis.coordinate(bar.bounds.position())
+                        + physical * (axis.length(bar.bounds) - axis.length(thumb))
+                        + grabbed_at * axis.length(thumb);
+                    let cursor = cursor + axis.vector(position - axis.coordinate(cursor));
+                    let percentage = bar.scroll_percentage(axis, grabbed_at, cursor).unwrap();
                     let expected = match anchor {
                         Anchor::Start => physical,
                         Anchor::End => 1.0 - physical,
                     };
                     close(percentage, expected);
-                    if horizontal {
-                        state.scroll_x_to(percentage, bounds, content);
-                    } else {
-                        state.scroll_y_to(percentage, bounds, content);
-                    }
-                    let updated = Scrollbars::new(&state, direction, bounds, content);
-                    let updated = if horizontal { updated.x } else { updated.y }
+                    state.scroll_to_percentage(axis, Some(percentage), bounds, content);
+                    let updated = bars(&state, direction, bounds, content)
+                        .scrollbar(axis)
                         .unwrap()
                         .scroller
                         .unwrap()
                         .bounds;
                     close(
-                        if horizontal {
-                            updated.x + grab * updated.width
-                        } else {
-                            updated.y + grab * updated.height
-                        },
-                        if horizontal { cursor.x } else { cursor.y },
+                        axis.coordinate(updated.position()) + grabbed_at * axis.length(updated),
+                        axis.coordinate(cursor),
                     );
                 }
             }
@@ -146,56 +138,30 @@ fn expanded_hit_area_keeps_axial_grab_position() {
         Scrollbar::new().width(24).scroller_width(6).margin(3),
     ] {
         let mut state = State::new();
-        state.snap_to(RelativeOffset {
-            x: Some(0.4),
-            y: Some(0.6),
-        });
-        let bars = Scrollbars::new(&state, both(configuration), bounds, content);
-        for (bar, horizontal, expected) in
-            [(bars.x.unwrap(), true, 0.4), (bars.y.unwrap(), false, 0.6)]
-        {
+        snap(&mut state, 0.4, 0.6, bounds, content);
+        let bars = bars(&state, both(configuration), bounds, content);
+        for (axis, expected) in [(Axis::X, 0.4), (Axis::Y, 0.6)] {
+            let bar = bars.scrollbar(axis).unwrap();
             let thumb = bar.scroller.unwrap().bounds;
-            for side in [
-                0.5,
-                if horizontal {
-                    bar.total_bounds.height - 0.5
-                } else {
-                    bar.total_bounds.width - 0.5
-                },
-            ] {
-                let cursor = if horizontal {
-                    Point::new(thumb.x + thumb.width * 0.2, bar.total_bounds.y + side)
-                } else {
-                    Point::new(bar.total_bounds.x + side, thumb.y + thumb.height * 0.2)
+            let cross_length = match axis {
+                Axis::X => bar.total_bounds.height,
+                Axis::Y => bar.total_bounds.width,
+            };
+            for side in [0.5, cross_length - 0.5] {
+                let cursor = match axis {
+                    Axis::X => Point::new(thumb.x + thumb.width * 0.2, bar.total_bounds.y + side),
+                    Axis::Y => Point::new(bar.total_bounds.x + side, thumb.y + thumb.height * 0.2),
                 };
                 assert!(!thumb.contains(cursor));
-                let grab = if horizontal {
-                    bars.grab_x_scroller(cursor)
-                } else {
-                    bars.grab_y_scroller(cursor)
-                }
-                .unwrap();
-                close(grab, 0.2);
+                let grabbed_at = grab(&bars, axis, cursor);
+                close(grabbed_at, 0.2);
                 close(
-                    if horizontal {
-                        bar.scroll_percentage_x(grab, cursor)
-                    } else {
-                        bar.scroll_percentage_y(grab, cursor)
-                    }
-                    .unwrap(),
+                    bar.scroll_percentage(axis, grabbed_at, cursor).unwrap(),
                     expected,
                 );
             }
             let track_cursor = Point::new(bar.total_bounds.x + 0.5, bar.total_bounds.y + 0.5);
-            close(
-                if horizontal {
-                    bars.grab_x_scroller(track_cursor)
-                } else {
-                    bars.grab_y_scroller(track_cursor)
-                }
-                .unwrap(),
-                0.5,
-            );
+            assert!(matches!(bars.hit(axis, track_cursor), Some((_, Hit::Rail))));
         }
     }
 }
@@ -206,25 +172,22 @@ fn short_tracks_do_not_change_the_scroll_position() {
         let (bounds, content) = geometry(size);
         for anchor in [Anchor::Start, Anchor::End] {
             let mut state = State::new();
-            state.snap_to(RelativeOffset {
-                x: Some(0.4),
-                y: Some(0.6),
-            });
-            let bars = Scrollbars::new(
+            snap(&mut state, 0.4, 0.6, bounds, content);
+            let bars = bars(
                 &state,
                 both(Scrollbar::new().anchor(anchor)),
                 bounds,
                 content,
             );
-            for (bar, horizontal) in [(bars.x.unwrap(), true), (bars.y.unwrap(), false)] {
+            for axis in [Axis::X, Axis::Y] {
+                let bar = bars.scrollbar(axis).unwrap();
                 for delta in [-100.0, 0.0, 100.0] {
                     let cursor = Point::new(bar.bounds.x + delta, bar.bounds.y + delta);
-                    let percentage = if horizontal {
-                        bar.scroll_percentage_x(0.0, cursor)
-                    } else {
-                        bar.scroll_percentage_y(0.0, cursor)
-                    };
+                    let percentage = bar.scroll_percentage(axis, 0.0, cursor);
                     assert_eq!(percentage, None);
+                    let previous = state.axis_offset(axis, bounds, content);
+                    state.scroll_to_percentage(axis, percentage, bounds, content);
+                    close(state.axis_offset(axis, bounds, content), previous);
                 }
             }
         }
@@ -240,12 +203,18 @@ fn custom_widths_and_hidden_scrollbars_preserve_native_scroll() {
     ] {
         let direction = both(configuration);
         let mut state = State::new();
-        state.scroll_to(AbsoluteOffset {
-            x: Some(50.0),
-            y: Some(70.0),
-        });
+        state.scroll_to(
+            AbsoluteOffset {
+                x: Some(50.0),
+                y: Some(70.0),
+            },
+            Animation::Instant,
+            bounds,
+            content,
+            Source::Operation,
+        );
         state.scroll(Vector::new(12.0, -8.0), bounds, content);
-        let bars = Scrollbars::new(&state, direction, bounds, content);
+        let bars = bars(&state, direction, bounds, content);
         let x = bars.x.unwrap();
         let y = bars.y.unwrap();
         close(x.bounds.height, configuration.width);
@@ -263,12 +232,18 @@ fn custom_widths_and_hidden_scrollbars_preserve_native_scroll() {
         close(translation.y, 62.0);
         if configuration.width == 0.0 {
             assert!(
-                bars.grab_x_scroller(Point::new(bounds.x + 10.0, bounds.y + bounds.height))
-                    .is_none()
+                bars.hit(
+                    Axis::X,
+                    Point::new(bounds.x + 10.0, bounds.y + bounds.height)
+                )
+                .is_none()
             );
             assert!(
-                bars.grab_y_scroller(Point::new(bounds.x + bounds.width, bounds.y + 10.0))
-                    .is_none()
+                bars.hit(
+                    Axis::Y,
+                    Point::new(bounds.x + bounds.width, bounds.y + 10.0)
+                )
+                .is_none()
             );
         }
     }
@@ -278,56 +253,64 @@ fn custom_widths_and_hidden_scrollbars_preserve_native_scroll() {
 fn native_pointer_events_preserve_grab_and_zero_travel_offsets() {
     use crate::core::shell::{Bus, Waker};
 
-    for horizontal in [false, true] {
+    for axis in [Axis::X, Axis::Y] {
         for anchor in [Anchor::Start, Anchor::End] {
             for touch_input in [false, true] {
                 let configuration = Scrollbar::new().anchor(anchor);
-                let direction = if horizontal {
-                    Direction::Horizontal(configuration)
-                } else {
-                    Direction::Vertical(configuration)
+                let direction = match axis {
+                    Axis::X => Direction::Horizontal(configuration),
+                    Axis::Y => Direction::Vertical(configuration),
                 };
-                let mut widget: Scrollable<'_, (), Theme, ()> =
+                let mut widget: Scrollable<'_, (), crate::Space, Theme> =
                     Scrollable::new(crate::Space::new()).direction(direction);
-                let mut tree = Tree::new(&widget as &dyn Widget<(), Theme, ()>);
-                widget.diff(&mut tree);
-                tree.state.downcast_mut::<State>().snap_to(RelativeOffset {
-                    x: Some(0.4),
-                    y: Some(0.4),
-                });
+                let mut tree = Tree::new::<(), Theme, ()>(&widget);
+                Widget::<(), Theme, ()>::diff(&mut widget, &mut tree);
                 for size in [300.0, 32.0] {
-                    let (bounds, content) = geometry(size);
-                    let node = layout::Node::with_children(
-                        bounds.size(),
-                        vec![layout::Node::new(content.size())],
-                    );
-                    let bounds = node.bounds();
-                    let content = node.children()[0].bounds();
-                    let bars = Scrollbars::new(
-                        tree.state.downcast_ref::<State>(),
-                        direction,
+                    let (_, content) = geometry(size);
+                    let bounds = Rectangle::with_size(Size::new(size, size));
+                    tree.size = bounds.size();
+                    tree.children[0].size = content;
+                    snap(
+                        tree.state.downcast_mut::<State>(),
+                        0.4,
+                        0.4,
                         bounds,
                         content,
                     );
-                    let bar = if horizontal { bars.x } else { bars.y }.unwrap();
-                    let thumb = bar.scroller.unwrap().bounds;
-                    let cursor = if horizontal {
-                        Point::new(thumb.x + thumb.width * 0.2, bar.total_bounds.y + 0.5)
-                    } else {
-                        Point::new(bar.total_bounds.x + 0.5, thumb.y + thumb.height * 0.2)
-                    };
+                    let layout = Layout::new(tree.size);
                     let mut send = |tree: &mut Tree, event: Event, cursor| {
                         let mut bus = Bus::new();
                         let mut shell = Shell::new(&window::Headless, Waker::noop(), &mut bus);
                         widget.update(
                             tree,
                             &event,
-                            Layout::new(&node),
+                            layout,
                             mouse::Cursor::Available(cursor),
                             &(),
                             &mut shell,
                             &bounds,
                         );
+                    };
+                    send(
+                        &mut tree,
+                        Event::Window(window::Event::RedrawRequested(Instant::now())),
+                        Point::ORIGIN,
+                    );
+                    let bars = bars(
+                        tree.state.downcast_ref::<State>(),
+                        direction,
+                        bounds,
+                        content,
+                    );
+                    let bar = bars.scrollbar(axis).unwrap();
+                    let thumb = bar.scroller.unwrap().bounds;
+                    let cursor = match axis {
+                        Axis::X => {
+                            Point::new(thumb.x + thumb.width * 0.2, bar.total_bounds.y + 0.5)
+                        }
+                        Axis::Y => {
+                            Point::new(bar.total_bounds.x + 0.5, thumb.y + thumb.height * 0.2)
+                        }
                     };
                     let press = if touch_input {
                         Event::Touch(touch::Event::FingerPressed {
@@ -339,15 +322,9 @@ fn native_pointer_events_preserve_grab_and_zero_travel_offsets() {
                     };
                     send(&mut tree, press, cursor);
                     let state = tree.state.downcast_ref::<State>();
-                    close(
-                        if horizontal {
-                            state.x_scroller_grabbed_at()
-                        } else {
-                            state.y_scroller_grabbed_at()
-                        }
-                        .unwrap(),
-                        0.2,
-                    );
+                    let (grabbed_axis, grabbed_at) = state.interaction.scroller_grabbed().unwrap();
+                    assert_eq!(grabbed_axis, axis);
+                    close(grabbed_at, 0.2);
                     close(
                         state.offset_x.absolute(bounds.width, content.width)
                             / (content.width - bounds.width),
@@ -358,11 +335,7 @@ fn native_pointer_events_preserve_grab_and_zero_travel_offsets() {
                             / (content.height - bounds.height),
                         0.4,
                     );
-                    let moved = if horizontal {
-                        Point::new(cursor.x + 50.0, cursor.y)
-                    } else {
-                        Point::new(cursor.x, cursor.y + 50.0)
-                    };
+                    let moved = cursor + axis.vector(50.0);
                     let movement = if touch_input {
                         Event::Touch(touch::Event::FingerMoved {
                             id: touch::Finger(0),
@@ -383,13 +356,8 @@ fn native_pointer_events_preserve_grab_and_zero_travel_offsets() {
                         }
                     };
                     close(
-                        if horizontal {
-                            state.offset_x.absolute(bounds.width, content.width)
-                                / (content.width - bounds.width)
-                        } else {
-                            state.offset_y.absolute(bounds.height, content.height)
-                                / (content.height - bounds.height)
-                        },
+                        state.axis_offset(axis, bounds, content)
+                            / (axis.length(content) - axis.length(bounds)),
                         expected,
                     );
                     let release = if touch_input {
@@ -401,11 +369,13 @@ fn native_pointer_events_preserve_grab_and_zero_travel_offsets() {
                         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
                     };
                     send(&mut tree, release, moved);
-                    assert!(!tree.state.downcast_ref::<State>().scrollers_grabbed());
-                    tree.state.downcast_mut::<State>().snap_to(RelativeOffset {
-                        x: Some(0.4),
-                        y: Some(0.4),
-                    });
+                    assert!(
+                        !tree
+                            .state
+                            .downcast_ref::<State>()
+                            .interaction
+                            .scrollers_grabbed()
+                    );
                 }
             }
         }

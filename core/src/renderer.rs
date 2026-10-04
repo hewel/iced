@@ -13,7 +13,7 @@ use crate::{
 pub const CRISP: bool = cfg!(feature = "crisp");
 
 /// A component that can be used by widgets to draw themselves on a screen.
-pub trait Renderer {
+pub trait Renderer: 'static {
     /// Blurs everything recorded before this point within the current clip.
     ///
     /// Later drawing remains crisp. `radius` is approximate Gaussian sigma in

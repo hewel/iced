@@ -256,12 +256,8 @@ pub fn present(
             let texture = &frame.frame.as_ref().expect("unpresented frame").texture;
             let view = &texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            let _submission = renderer.present(
-                Some(background_color),
-                texture.format(),
-                view,
-                viewport,
-            );
+            let _submission =
+                renderer.present(Some(background_color), texture.format(), view, viewport);
 
             // Present the frame
             on_pre_present();
@@ -270,9 +266,7 @@ pub fn present(
             Ok(())
         }
         wgpu::CurrentSurfaceTexture::Suboptimal(_) => unreachable!("discarded during acquisition"),
-        wgpu::CurrentSurfaceTexture::Outdated => {
-            Err(compositor::SurfaceError::Outdated)
-        }
+        wgpu::CurrentSurfaceTexture::Outdated => Err(compositor::SurfaceError::Outdated),
         wgpu::CurrentSurfaceTexture::Timeout => Err(compositor::SurfaceError::Timeout),
         wgpu::CurrentSurfaceTexture::Occluded => Err(compositor::SurfaceError::Occluded),
         wgpu::CurrentSurfaceTexture::Lost => Err(compositor::SurfaceError::Lost),
@@ -360,7 +354,11 @@ impl graphics::Compositor for Compositor {
     }
 
     fn configure_surface(&mut self, surface: &mut Self::Surface, width: u32, height: u32) {
-        let _guard = self.engine.queue_synchronization.as_deref().map(crate::QueueGuard::acquire);
+        let _guard = self
+            .engine
+            .queue_synchronization
+            .as_deref()
+            .map(crate::QueueGuard::acquire);
         surface.configure(
             &self.engine.device,
             &wgpu::SurfaceConfiguration {

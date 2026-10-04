@@ -1,7 +1,9 @@
 use crate::interop::{Command, PlayerEvent};
 use iced_wgpu::Renderer;
-use iced_widget::{bottom, button, checkbox, column, container, row, scrollable, slider, text};
-use iced_winit::core::{Element, Font, Pixels, Theme};
+use iced_widget::{
+    Widget, bottom, button, checkbox, column, container, row, scrollable, slider, text,
+};
+use iced_winit::core::{Font, Pixels, Theme};
 
 pub struct Controls {
     show_details: bool,
@@ -166,7 +168,7 @@ impl Controls {
             && self.duration.is_some_and(|duration| duration > 0.0)
     }
 
-    pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
+    pub fn view(&self) -> impl Widget<Message, Theme, Renderer> {
         let status = match self.file_state {
             FileState::Shutdown => "mpv shut down",
             FileState::Loading => "Loading",
@@ -224,14 +226,16 @@ impl Controls {
                 )
                 .step(0.1)
                 .height(40)
-                .on_release(Message::CommitSeek),
+                .on_release(Message::CommitSeek)
+                .boxed(),
             );
         } else {
             content = content.push(
                 text(
                     "Timeline unavailable: requires active seekable media, position, and duration",
                 )
-                .size(14),
+                .size(14)
+                .boxed(),
             );
         }
         if let Some(preview) = self.seek_preview {
@@ -245,7 +249,8 @@ impl Controls {
                     button("Seek").height(40).on_press(Message::CommitSeek),
                 ]
                 .spacing(10)
-                .wrap(),
+                .wrap()
+                .boxed(),
             );
         }
 
@@ -258,7 +263,8 @@ impl Controls {
                 "Volume: {volume_label} · observed pause: {}",
                 flag_label(self.pause)
             ))
-            .size(14),
+            .size(14)
+            .boxed(),
         );
         if let Some(volume) = self
             .volume
@@ -267,7 +273,8 @@ impl Controls {
             content = content.push(
                 slider(0.0..=volume.max(100.0), volume, Message::SetVolume)
                     .step(1.0)
-                    .height(40),
+                    .height(40)
+                    .boxed(),
             );
         }
         content = content.push(
@@ -284,7 +291,8 @@ impl Controls {
                         .filter(|_| self.file_state == FileState::Ready)
                 ),
             ))
-            .size(14),
+            .size(14)
+            .boxed(),
         );
 
         if let Some(error) = &self.error {
@@ -298,7 +306,8 @@ impl Controls {
                     .wrap(),
                 )
                 .padding(8)
-                .style(container::bordered_box),
+                .style(container::bordered_box)
+                .boxed(),
             );
         }
 
@@ -309,7 +318,7 @@ impl Controls {
             .spacing(10)
             .text_size(14)
             .line_height(Pixels(40.0));
-        content = content.push(toggle);
+        content = content.push(toggle.boxed());
         if self.show_details {
             let last_presented = self.last_presented_at.map_or_else(
                 || "unavailable".to_owned(),
@@ -327,7 +336,8 @@ impl Controls {
                     text(format!("Last frame.present: {last_presented} (host elapsed)")).size(14),
                     text("Source PTS: unavailable · playback clock is not the displayed image timestamp").size(14),
                 ]
-                .spacing(4),
+                .spacing(4)
+                .boxed(),
             );
         }
 
@@ -335,7 +345,6 @@ impl Controls {
             container(content).padding([8, 14]).style(container::dark),
         ))
         .padding(16)
-        .into()
     }
 }
 

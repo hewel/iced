@@ -1,12 +1,12 @@
 use iced::keyboard;
 use iced::widget::{
-    self, Text, button, center, center_x, checkbox, column, keyed_column, operation, row,
-    scrollable, text, text_input,
+    self, Text, button, center, center_x, checkbox, column, container, keyed_column, operation,
+    row, scrollable, sticky, text, text_input,
 };
 use iced::window;
 use iced::{
-    Application, Center, Element, Fill, Fit, Function, Preset, Program, Subscription,
-    Task as Command, Theme,
+    Application, Center, Fill, Fit, Function, Preset, Program, Subscription, Task as Command,
+    Theme, Widget,
 };
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ impl Todos {
 
                 Command::batch([
                     operation::focus("new-task"),
-                    operation::move_cursor_to_end("new-task"),
+                    operation::text_input::move_cursor_to_end("new-task"),
                 ])
             }
             Todos::Loaded(state) => {
@@ -134,7 +134,7 @@ impl Todos {
                                 let id = Task::text_input_id(i);
                                 Command::batch(vec![
                                     operation::focus(id.clone()),
-                                    operation::select_all(id),
+                                    operation::text_input::select_all(id),
                                 ])
                             } else {
                                 Command::none()
@@ -188,33 +188,38 @@ impl Todos {
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> {
         match self {
-            Todos::Loading => loading_message(),
+            Todos::Loading => loading_message().boxed(),
             Todos::Loaded(State {
                 input_value,
                 filter,
                 tasks,
                 ..
             }) => {
-                let title = text("todos")
-                    .width(Fill)
-                    .size(100)
-                    .style(subtle)
-                    .align_x(Center);
+                let header = {
+                    let title = text("todos")
+                        .width(Fill)
+                        .size(100)
+                        .style(subtle)
+                        .align_x(Center);
 
-                let input = text_input("What needs to be done?", input_value)
-                    .id("new-task")
-                    .on_input(Message::InputChanged)
-                    .on_submit(Message::CreateTask)
-                    .padding(15)
-                    .size(30)
-                    .align_x(Center);
+                    let input = text_input("What needs to be done?", input_value)
+                        .id("new-task")
+                        .on_input(Message::InputChanged)
+                        .on_submit(Message::CreateTask)
+                        .padding(15)
+                        .size(30)
+                        .align_x(Center);
 
-                let controls = view_controls(tasks, *filter);
+                    let controls = view_controls(tasks, *filter);
+
+                    column![title, input, controls].spacing(20)
+                };
+
                 let filtered_tasks = tasks.iter().filter(|task| filter.matches(task));
 
-                let tasks: Element<_> = if filtered_tasks.count() > 0 {
+                let tasks = if filtered_tasks.count() > 0 {
                     keyed_column(
                         tasks
                             .iter()
@@ -225,20 +230,28 @@ impl Todos {
                             }),
                     )
                     .spacing(10)
-                    .into()
+                    .boxed()
                 } else {
                     empty_message(match filter {
                         Filter::All => "You have not created a task yet...",
                         Filter::Active => "All your tasks are done! :D",
                         Filter::Completed => "You have not completed a task yet...",
                     })
+                    .boxed()
                 };
 
-                let content = column![title, input, controls, tasks]
-                    .spacing(20)
-                    .width(Fit.max(800));
+                let content = column![
+                    sticky(container(header).style(|theme: &Theme| {
+                        container::Style::default().background(theme.seed().background)
+                    })),
+                    tasks
+                ]
+                .spacing(20)
+                .width(Fit.max(400));
 
-                scrollable(center_x(content).padding(40)).into()
+                container(scrollable(center_x(content)).spacing(10))
+                    .padding(10)
+                    .boxed()
             }
         }
     }
@@ -329,7 +342,7 @@ impl Task {
         }
     }
 
-    fn view(&self, i: usize) -> Element<'_, TaskMessage> {
+    fn view(&self, i: usize) -> impl Widget<TaskMessage> {
         match &self.state {
             TaskState::Idle => {
                 let checkbox = checkbox(self.completed)
@@ -348,7 +361,7 @@ impl Task {
                 ]
                 .spacing(20)
                 .align_y(Center)
-                .into()
+                .boxed()
             }
             TaskState::Editing => {
                 let text_input = text_input("Describe your task...", &self.description)
@@ -366,13 +379,13 @@ impl Task {
                 ]
                 .spacing(20)
                 .align_y(Center)
-                .into()
+                .boxed()
             }
         }
     }
 }
 
-fn view_controls(tasks: &[Task], current_filter: Filter) -> Element<'_, Message> {
+fn view_controls(tasks: &[Task], current_filter: Filter) -> impl Widget<Message> {
     let tasks_left = tasks.iter().filter(|task| !task.completed).count();
 
     let filter_button = |label, filter, current_filter| {
@@ -402,7 +415,6 @@ fn view_controls(tasks: &[Task], current_filter: Filter) -> Element<'_, Message>
     ]
     .spacing(20)
     .align_y(Center)
-    .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -423,11 +435,11 @@ impl Filter {
     }
 }
 
-fn loading_message<'a>() -> Element<'a, Message> {
-    center(text("Loading...").width(Fill).align_x(Center).size(50)).into()
+fn loading_message() -> impl Widget<Message> {
+    center(text("Loading...").width(Fill).align_x(Center).size(50))
 }
 
-fn empty_message(message: &str) -> Element<'_, Message> {
+fn empty_message(message: &str) -> impl Widget<Message> {
     center(
         text(message)
             .width(Fill)
@@ -436,7 +448,6 @@ fn empty_message(message: &str) -> Element<'_, Message> {
             .style(subtle),
     )
     .height(200)
-    .into()
 }
 
 // Fonts
@@ -460,6 +471,7 @@ fn delete_icon() -> Text<'static> {
 fn subtle(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme.palette().background.strongest.color),
+        selection: None,
     }
 }
 

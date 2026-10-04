@@ -7,28 +7,39 @@ configuration change.
 
 ## Upstream baseline and provenance
 
-The verified official baseline at preparation is
-[`cfeef0bb3a4a3dbf6615fd193539e454ccd06a6a`](https://github.com/iced-rs/iced/commit/cfeef0bb3a4a3dbf6615fd193539e454ccd06a6a).
-It is the second parent of fork merge
-[`0d99cb7a935149b22ab9519d709b7c948d3a7a08`](https://github.com/hewel/iced/commit/0d99cb7a935149b22ab9519d709b7c948d3a7a08),
-whose subject is `Merge branch 'iced-rs:master' into main`. The merge-base with
-fork `main` is that same commit. A read-only query of the official repository's
-`refs/heads/master` also returned that exact SHA. This is a recorded baseline,
-not a promise that upstream's moving branch still points there.
+The official baseline for the 2026-10-04 synchronization is
+[`82acd61ea207d6f85b99da5e95b66f9a968de3f2`](https://github.com/iced-rs/iced/commit/82acd61ea207d6f85b99da5e95b66f9a968de3f2),
+verified against the official repository's `refs/heads/master` before merging.
+The previous upstream baseline was `c756d97e98c67b0be78ffdf6f71b577a44fe394c`;
+the pre-sync product tip was `25607290dbb60a1365850f7e2afb5ec1b3201063`.
+The synchronization retains both histories with a real merge. These are recorded
+revisions, not a promise that upstream's moving branch still points there.
 
 Recheck evidence rather than inferring ancestry from a release number or subject:
 
 ```sh
 git remote -v
-git rev-list --parents -n 1 0d99cb7a935149b22ab9519d709b7c948d3a7a08
-git merge-base main cfeef0bb3a4a3dbf6615fd193539e454ccd06a6a
-git log --oneline cfeef0bb3a4a3dbf6615fd193539e454ccd06a6a..main
+git log --merges -n 1 --format='%H %P' main
+git merge-base main 82acd61ea207d6f85b99da5e95b66f9a968de3f2
+git log --oneline 82acd61ea207d6f85b99da5e95b66f9a968de3f2..main
 git ls-remote https://github.com/iced-rs/iced.git refs/heads/master
 ```
 
 The inspected checkout has only `origin = git@github.com:hewel/iced.git`, no
 `upstream`. If history or official remote evidence is unavailable, record the
 baseline as unverified; do not substitute an assumed tag or latest release.
+
+This baseline changes custom widget contracts (`Meta`, generic widget content,
+layout stored in `widget::Tree`, and overlay invalidation) and includes upstream
+wgpu 30 support. The fork now uses the official `iced-rs/cryoglyph` revision
+`e13618df29a5593968040c12ab086b7237249ded`; the temporary `hewel/cryoglyph` wgpu-30
+pin is retired. Custom compositor and shared queue contracts below still apply.
+
+The existing fork hashes under `examples/styling/snapshots` and
+`examples/todos/snapshots` remain reference artifacts from before this sync.
+They were not regenerated to accept the new layout/text output. Visual snapshot
+acceptance and the application's joint native/color acceptance remain separate
+from compilation and the focused behavioral regression tests.
 
 ## Local changes to preserve
 

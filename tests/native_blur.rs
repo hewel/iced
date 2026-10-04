@@ -438,7 +438,7 @@ fn progress_clips_reuse_blur_but_scale_and_source_changes_do_not() {
 
 fn widget_pixels(
     renderer: &mut iced::Renderer,
-    element: iced::Element<'_, ()>,
+    element: impl iced::Widget<()>,
     size: Size<u32>,
 ) -> Vec<u8> {
     let logical = Size::new(size.width as f32, size.height as f32);
@@ -466,8 +466,7 @@ fn widget_glass_tint_is_above_blur_and_hero_fade_keeps_display_coordinates() {
             .width(64)
             .height(64)
             .blur(6.0)
-            .tint(tint)
-            .into(),
+            .tint(tint),
         Size::new(64, 64),
     );
     let p = pixel(&tinted, 64, 32, 32);
@@ -485,8 +484,7 @@ fn widget_glass_tint_is_above_blur_and_hero_fade_keeps_display_coordinates() {
             .width(64)
             .height(64)
             .blur(6.0)
-            .tint(fade)
-            .into(),
+            .tint(fade),
         Size::new(64, 64),
     );
     let glass = widget_pixels(
@@ -497,8 +495,7 @@ fn widget_glass_tint_is_above_blur_and_hero_fade_keeps_display_coordinates() {
             .blur(6.0)
             .display_frame(rect(-24.0, 0.0, 64.0, 64.0))
             .mask_frame(rect(0.0, 0.0, 16.0, 64.0))
-            .tint(fade)
-            .into(),
+            .tint(fade),
         Size::new(16, 64),
     );
     for y in [8, 24, 40, 56] {

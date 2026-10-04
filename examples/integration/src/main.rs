@@ -131,6 +131,7 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                     },
                 );
 
@@ -230,6 +231,7 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
                                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
                                 view_formats: vec![],
                                 desired_maximum_frame_latency: 2,
+                                color_space: wgpu::SurfaceColorSpace::Auto,
                             },
                         );
 

@@ -5,8 +5,8 @@ use iced::widget::{
     toggler,
 };
 use iced::{
-    Background, Border, Color, ContentFit, Element, Fill, Padding, Radians, Rectangle, Shadow,
-    Subscription, Task, Theme, Vector,
+    Background, Border, Color, ContentFit, Fill, Padding, Radians, Rectangle, Shadow, Subscription,
+    Task, Theme, Vector, Widget,
 };
 
 pub fn main() -> iced::Result {
@@ -208,7 +208,7 @@ impl Example {
         })
     }
 
-    fn poster(&self, fragmented: bool, top_only: bool) -> Element<'_, Message> {
+    fn poster(&self, fragmented: bool, top_only: bool) -> impl Widget<Message> {
         let radius = if top_only {
             border::top(24)
         } else {
@@ -276,10 +276,9 @@ impl Example {
             .size(13)
         ]
         .spacing(8)
-        .into()
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> {
         let (_, panel, border_color) = self.colors();
         let fill = if self.gradient {
             Background::Gradient(
@@ -413,7 +412,6 @@ impl Example {
             .spacing(36),
         )
         .padding(24)
-        .into()
     }
 }
 
@@ -422,7 +420,7 @@ mod quad {
     use iced::advanced::renderer;
     use iced::advanced::widget::{self, Widget};
     use iced::mouse;
-    use iced::{Background, Border, Element, Length, Rectangle, Shadow, Size};
+    use iced::{Background, Border, Length, Rectangle, Shadow, Size};
 
     pub struct CustomQuad {
         pub border: Border,
@@ -430,6 +428,8 @@ mod quad {
         pub snap: bool,
         pub fill: Background,
     }
+    impl widget::Meta for CustomQuad {}
+
     impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for CustomQuad
     where
         Renderer: renderer::Renderer,
@@ -439,11 +439,11 @@ mod quad {
         }
         fn layout(
             &mut self,
-            _tree: &mut widget::Tree,
+            tree: &mut widget::Tree,
             _renderer: &Renderer,
             _limits: &layout::Limits,
-        ) -> layout::Node {
-            layout::Node::new(Size::new(460.0, 170.0))
+        ) {
+            tree.size = Size::new(460.0, 170.0);
         }
         fn draw(
             &self,
@@ -451,7 +451,7 @@ mod quad {
             renderer: &mut Renderer,
             _theme: &Theme,
             _style: &renderer::Style,
-            layout: Layout<'_>,
+            layout: Layout,
             _cursor: mouse::Cursor,
             _viewport: &Rectangle,
         ) {
@@ -464,11 +464,6 @@ mod quad {
                 },
                 self.fill,
             );
-        }
-    }
-    impl<Message> From<CustomQuad> for Element<'_, Message> {
-        fn from(quad: CustomQuad) -> Self {
-            Self::new(quad)
         }
     }
 }

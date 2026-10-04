@@ -44,7 +44,12 @@ impl Cache {
     ) -> Self {
         #[cfg(all(feature = "image", not(target_arch = "wasm32")))]
         let worker = Worker::new(
-            device, _queue, backend, layout.clone(), _shell, _queue_synchronization.clone(),
+            device,
+            _queue,
+            backend,
+            layout.clone(),
+            _shell,
+            _queue_synchronization.clone(),
         );
 
         Self {
@@ -135,7 +140,10 @@ impl Cache {
 
                 self.raster.belt.finish();
                 let submission = {
-                    let _guard = self.queue_synchronization.as_deref().map(crate::QueueGuard::acquire);
+                    let _guard = self
+                        .queue_synchronization
+                        .as_deref()
+                        .map(crate::QueueGuard::acquire);
                     queue.submit([encoder.finish()])
                 };
                 self.raster.belt.recall();
@@ -612,7 +620,10 @@ mod worker {
             self.belt.finish();
             let bind_group = atlas.bind_group().clone();
             let submission = {
-                let _guard = self.queue_synchronization.as_deref().map(crate::QueueGuard::acquire);
+                let _guard = self
+                    .queue_synchronization
+                    .as_deref()
+                    .map(crate::QueueGuard::acquire);
                 let submission = self.queue.submit([encoder.finish()]);
 
                 // This callback can run during a later guarded submit. Keep it

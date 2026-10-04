@@ -2,17 +2,17 @@
 //!
 //! # Example
 //! ```no_run
-//! # mod iced { pub mod widget { pub use iced_widget::*; } }
+//! # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
+//! # use iced::widget::Widget;
 //! # pub type State = ();
-//! # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
 //! use iced::widget::image;
 //!
 //! enum Message {
 //!     // ...
 //! }
 //!
-//! fn view(state: &State) -> Element<'_, Message> {
-//!     image("ferris.png").into()
+//! fn view(state: &State) -> impl Widget<Message> {
+//!     image("ferris.png")
 //! }
 //! ```
 //! <img src="https://github.com/iced-rs/iced/blob/9712b319bb7a32848001b96bd84977430f14b623/examples/resources/ferris.png?raw=true" width="300">
@@ -24,10 +24,8 @@ use crate::core::image;
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::renderer;
-use crate::core::widget::Tree;
-use crate::core::{
-    ContentFit, Element, Layout, Length, Point, Rectangle, Rotation, Size, Vector, Widget,
-};
+use crate::core::widget::{Meta, Tree};
+use crate::core::{ContentFit, Layout, Length, Point, Rectangle, Rotation, Size, Vector, Widget};
 
 pub use image::{FilterMethod, Handle};
 
@@ -40,17 +38,17 @@ pub fn viewer<Handle>(handle: Handle) -> Viewer<Handle> {
 ///
 /// # Example
 /// ```no_run
-/// # mod iced { pub mod widget { pub use iced_widget::*; } }
+/// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
+/// # use iced::widget::Widget;
 /// # pub type State = ();
-/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
 /// use iced::widget::image;
 ///
 /// enum Message {
 ///     // ...
 /// }
 ///
-/// fn view(state: &State) -> Element<'_, Message> {
-///     image("ferris.png").into()
+/// fn view(state: &State) -> impl Widget<Message> {
+///     image("ferris.png")
 /// }
 /// ```
 /// <img src="https://github.com/iced-rs/iced/blob/9712b319bb7a32848001b96bd84977430f14b623/examples/resources/ferris.png?raw=true" width="300">
@@ -271,7 +269,7 @@ pub fn layout<Renderer, Handle>(
     content_fit: ContentFit,
     rotation: Rotation,
     expand: bool,
-) -> layout::Node
+) -> Size
 where
     Renderer: image::Renderer<Handle = Handle>,
 {
@@ -283,7 +281,7 @@ where
 
     // The size to be available to the widget prior to `Shrink`ing
     let bounds = if expand {
-        limits.width(width).height(height).max()
+        limits.width(width).height(height).bounds()
     } else {
         limits.resolve(width, height, rotated_size)
     };
@@ -292,7 +290,7 @@ where
     let full_size = content_fit.fit(rotated_size, bounds);
 
     // Shrink the widget to fit the resized image, if requested
-    let final_size = Size {
+    Size {
         width: match width {
             Length::Shrink => f32::min(bounds.width, full_size.width),
             _ => bounds.width,
@@ -301,9 +299,7 @@ where
             Length::Shrink => f32::min(bounds.height, full_size.height),
             _ => bounds.height,
         },
-    };
-
-    layout::Node::new(final_size)
+    }
 }
 
 fn drawing_bounds<Renderer, Handle>(
@@ -372,7 +368,7 @@ fn crop(size: Size<u32>, region: Option<Rectangle<u32>>) -> Size<f32> {
 /// Draws an [`Image`]
 pub fn draw<Renderer, Handle>(
     renderer: &mut Renderer,
-    layout: Layout<'_>,
+    layout: Layout,
     handle: &Handle,
     crop: Option<Rectangle<u32>>,
     border_radius: border::Radius,
@@ -413,6 +409,8 @@ pub fn draw<Renderer, Handle>(
     );
 }
 
+impl<Handle> Meta for Image<Handle> {}
+
 impl<Message, Theme, Renderer, Handle> Widget<Message, Theme, Renderer> for Image<Handle>
 where
     Renderer: image::Renderer<Handle = Handle>,
@@ -425,13 +423,8 @@ where
         }
     }
 
-    fn layout(
-        &mut self,
-        _tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        layout(
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+        tree.size = layout(
             renderer,
             limits,
             &self.handle,
@@ -441,7 +434,7 @@ where
             self.content_fit,
             self.rotation,
             self.expand,
-        )
+        );
     }
 
     fn draw(
@@ -450,7 +443,7 @@ where
         renderer: &mut Renderer,
         _theme: &Theme,
         _style: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
@@ -465,11 +458,11 @@ where
         let Some(visible) = visible.intersection(_viewport) else {
             return;
         };
-        let node = layout::Node::new(frame.size()).move_to(frame.position());
+        let layout = Layout::new(frame.size()).move_to(frame.position());
         let render = |renderer: &mut Renderer| {
             draw(
                 renderer,
-                Layout::new(&node),
+                layout,
                 &self.handle,
                 self.crop,
                 self.border_radius,
@@ -512,16 +505,5 @@ where
                 );
             });
         }
-    }
-}
-
-impl<'a, Message, Theme, Renderer, Handle> From<Image<Handle>>
-    for Element<'a, Message, Theme, Renderer>
-where
-    Renderer: image::Renderer<Handle = Handle>,
-    Handle: Clone + 'a,
-{
-    fn from(image: Image<Handle>) -> Element<'a, Message, Theme, Renderer> {
-        Element::new(image)
     }
 }

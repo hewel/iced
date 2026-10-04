@@ -31,9 +31,7 @@ impl Engine {
         antialiasing: Option<Antialiasing>, // TODO: Initialize AA pipelines lazily
         shell: Shell,
     ) -> Self {
-        Self::with_queue_synchronization(
-            _adapter, device, queue, format, antialiasing, shell, None,
-        )
+        Self::with_queue_synchronization(_adapter, device, queue, format, antialiasing, shell, None)
     }
 
     /// Creates an engine sharing external native queue synchronization.
@@ -51,7 +49,12 @@ impl Engine {
         queue_synchronization: Arc<dyn crate::QueueSynchronization>,
     ) -> Self {
         Self::with_queue_synchronization(
-            adapter, device, queue, format, antialiasing, shell,
+            adapter,
+            device,
+            queue,
+            format,
+            antialiasing,
+            shell,
             Some(queue_synchronization),
         )
     }

@@ -243,6 +243,8 @@ impl State {
                     bounds,
                     clip_bounds,
                 } => {
+                    // Keep signed coordinates when snapping: scrolled content is
+                    // clipped later and must not be saturated to the origin.
                     let bounds = shape::snap(*bounds * scale, image.snap);
                     let clip_bounds = shape::snap(*clip_bounds * scale, image.snap);
 
@@ -495,6 +497,8 @@ impl State {
                     bounds,
                     clip_bounds,
                 } => {
+                    // Like raster images, vectors may extend above or left of
+                    // the viewport; clipping happens after signed snapping.
                     let bounds = shape::snap(*bounds * scale, true);
                     let clip_bounds = shape::snap(*clip_bounds * scale, true);
 
