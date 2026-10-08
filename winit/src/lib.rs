@@ -31,6 +31,7 @@ pub mod conversion;
 
 mod error;
 mod proxy;
+mod redraw;
 mod window;
 
 pub use clipboard::Clipboard;
@@ -832,26 +833,24 @@ async fn run_instance<P, C, F, Fut>(
                                 &mut messages,
                             );
 
-                            if redraw_count >= 2 {
-                                log::warn!(
-                                    "3 consecutive RedrawRequested events produced invalidation"
-                                );
+                            match redraw::decide(
+                                redraw_count,
+                                &state,
+                                message_count != messages.len(),
+                            ) {
+                                redraw::Decision::Settled => break state,
+                                redraw::Decision::LimitReached => {
+                                    log::warn!(
+                                        "3 consecutive RedrawRequested events produced invalidation"
+                                    );
 
-                                break state;
-                            }
-
-                            if message_count == messages.len() {
-                                match state {
-                                    user_interface::State::Outdated => {}
-                                    user_interface::State::Updated { change, .. } => match change {
-                                        user_interface::Change::None => break state,
-                                        user_interface::Change::Overlay => {
-                                            redraw_count += 1;
-                                            continue;
-                                        }
-                                        user_interface::Change::Layout => {}
-                                    },
+                                    break state;
                                 }
+                                redraw::Decision::RetryOverlay => {
+                                    redraw_count += 1;
+                                    continue;
+                                }
+                                redraw::Decision::Continue => {}
                             }
 
                             redraw_count += 1;
