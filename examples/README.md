@@ -133,6 +133,38 @@ Optional `--font=<ManropeV5VF.ttf>` loads the application's font at weight 300.
 `--capture=/tmp/back-glass.png` saves the initial window and exits. Pass options
 after Cargo's `--`; the blur slider and Save PNG button work interactively.
 
+## Sticky navigation with a progressive backdrop
+
+```sh
+cargo run --package native_blur --bin sticky_navigation
+```
+
+Scroll the field notebook: its navigation starts below the introduction,
+scrolls up, then sticks to the top. A 160 px live backdrop fades from blurred
+at the top to sharp at the lower edge. A light translucent tint fades
+alongside it; navigation text and buttons are drawn last and remain sharp.
+The original navigation slot stays in the page, so sticking does not shift
+the content. Journal, Places, and Saved jump to their sections; FIELDNOTES
+returns to the top. A separate 260 px backdrop at the bottom viewport edge
+starts completely sharp and gradually becomes blurred, without a tint or an
+opaque background. Its strength slider is drawn afterward and stays sharp.
+Toggle Blur in the navigation to compare the same tint without blur, or
+adjust the fixed bottom slider. No animation timer or external assets are
+needed.
+
+The blur layers are inside the scrollable's content. Its embedded native
+scrollbar is drawn afterward, and foreground controls reserve the scrollbar's
+14 px lane. This keeps the rail and thumb sharp and available for dragging.
+
+For manual acceptance, scroll down and back across the sticking point, scroll
+while the pointer is over the navigation and its fade, try the section links,
+and compare fine landscape lines with Blur on and off. Watch text and images
+enter the bottom fade: the sharp entry edge should have no abrupt blur seam,
+and the foreground slider and scrollbar should remain sharp. Drag the scrollbar
+through both blurred regions and try its track clicks. Resize the window to
+check clipping. Both `ICED_BACKEND=wgpu` and `ICED_BACKEND=tiny-skia` can run
+this example; compilation alone is not visual acceptance.
+
 ## Progressive images and live glass
 
 ```sh

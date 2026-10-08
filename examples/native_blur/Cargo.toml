@@ -8,3 +8,6 @@ default-run = "native_blur"
 [dependencies]
 iced.workspace = true
 iced.features = ["image", "tokio"]
+
+[dev-dependencies]
+iced_core.workspace = true
