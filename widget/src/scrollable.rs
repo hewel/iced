@@ -1415,6 +1415,13 @@ impl Default for State {
 }
 
 impl operation::Scrollable for State {
+    fn absolute_offset(&self, bounds: Rectangle, content: Size) -> Option<AbsoluteOffset> {
+        Some(AbsoluteOffset {
+            x: self.offset_x.absolute(bounds.width, content.width),
+            y: self.offset_y.absolute(bounds.height, content.height),
+        })
+    }
+
     fn snap_to(
         &mut self,
         offset: RelativeOffset<Option<f32>>,

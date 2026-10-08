@@ -31,6 +31,9 @@ pub trait Operation<T = ()>: Send {
     fn container(&mut self, _id: Option<&Id>, _bounds: Rectangle, _viewport: &Rectangle) {}
 
     /// Operates on a widget that can be scrolled.
+    ///
+    /// The translation describes the presented content geometry. To query
+    /// current state changes before presentation, use [`Scrollable::absolute_offset`].
     fn scrollable(
         &mut self,
         _id: Option<&Id>,

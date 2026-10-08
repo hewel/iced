@@ -5,6 +5,18 @@ use crate::{Rectangle, Size, Vector};
 
 /// The internal state of a widget that can be scrolled.
 pub trait Scrollable {
+    /// Returns the current scroll offset, clamped to the given bounds and content.
+    ///
+    /// Unlike the translation passed to [`Operation::scrollable`], this reflects
+    /// immediate state changes even before the next frame is drawn. It does not
+    /// return the destination of an in-progress animation. Offsets are measured
+    /// from the widget's anchor, so they may differ from its content translation.
+    ///
+    /// Returns `None` when the implementation does not support reading its offset.
+    fn absolute_offset(&self, _bounds: Rectangle, _content: Size) -> Option<AbsoluteOffset> {
+        None
+    }
+
     /// Snaps the scroll of the widget to the given `percentage` along the horizontal & vertical axis.
     fn snap_to(
         &mut self,
