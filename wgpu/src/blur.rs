@@ -14,6 +14,7 @@ impl Target {
     pub fn bytes(&self) -> usize {
         self.capacity[0] as usize
             * self.capacity[1] as usize
+            * self._texture.depth_or_array_layers() as usize
             * self._texture.format().block_copy_size(None).unwrap_or(4) as usize
     }
 }
@@ -27,9 +28,10 @@ pub(crate) struct Pipeline {
     composite_textures: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
+    layers: u32,
 }
 impl Pipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, backend: wgpu::Backend) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blur texture"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -66,7 +68,14 @@ impl Pipeline {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blur"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader/blur.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("shader/gaussian.wgsl"),
+                    "\n",
+                    include_str!("shader/blur.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blur"),
@@ -105,7 +114,14 @@ impl Pipeline {
         });
         let profile_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("progressive blur"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader/progressive_blur.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("shader/gaussian.wgsl"),
+                    "\n",
+                    include_str!("shader/progressive_blur.wgsl")
+                )
+                .into(),
+            ),
         });
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("backdrop replacement"),
@@ -176,6 +192,10 @@ impl Pipeline {
             composite_textures,
             sampler,
             format,
+            // Mirror the image atlas: GLES chooses GL_TEXTURE_2D_ARRAY only
+            // when the allocation has more than one layer. A D2Array view of a
+            // one-layer GL_TEXTURE_2D silently samples transparent pixels.
+            layers: if backend == wgpu::Backend::Gl { 2 } else { 1 },
         }
     }
     pub fn target(&self, device: &wgpu::Device, size: [u32; 2]) -> Target {
@@ -184,7 +204,7 @@ impl Pipeline {
             size: wgpu::Extent3d {
                 width: size[0],
                 height: size[1],
-                depth_or_array_layers: 1,
+                depth_or_array_layers: self.layers,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -193,7 +213,11 @@ impl Pipeline {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
         let array = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -214,6 +238,7 @@ impl Pipeline {
             capacity: size,
         }
     }
+    #[cfg(feature = "image")]
     pub fn pooled_target(&self, device: &wgpu::Device, size: [u32; 2]) -> Target {
         let mut target = self.target(device, [1024, 1024]);
         target.size = size;
@@ -342,6 +367,7 @@ impl Pipeline {
         blurred: &Target,
         destination: &wgpu::TextureView,
         tile: Rectangle<u32>,
+        sample_region: Rectangle,
         backdrop: renderer::Backdrop,
         clip: Rectangle,
     ) {
@@ -369,6 +395,12 @@ impl Pipeline {
         });
         let radii: [f32; 4] = backdrop.border_radius.into();
         let bounds = backdrop.bounds;
+        let optics = backdrop.optics;
+        let [r, g, b, a] = crate::graphics::color::pack(
+            optics.map_or(crate::core::Color::TRANSPARENT, |optics| optics.tint),
+        )
+        .components();
+        let light = optics.map_or(crate::core::Vector::ZERO, |optics| optics.light);
         let constants = self.parameters(
             device,
             &[
@@ -400,6 +432,22 @@ impl Pipeline {
                 clip.y,
                 clip.width,
                 clip.height,
+                sample_region.x,
+                sample_region.y,
+                sample_region.width,
+                sample_region.height,
+                optics.map_or(0.0, |optics| optics.refraction),
+                optics.map_or(1.0, |optics| optics.depth),
+                optics.map_or(0.0, |optics| optics.highlight),
+                optics.map_or(0.0, |optics| optics.shadow),
+                light.x,
+                light.y,
+                u32::from(optics.is_some()) as f32,
+                0.0,
+                r * a,
+                g * a,
+                b * a,
+                a,
             ],
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -528,22 +576,27 @@ pub(crate) struct Scene {
     snapshot: Option<Target>,
     scratch: Vec<Target>,
     cache: Vec<(u64, Target)>,
+    quality: Vec<crate::graphics::glass::QualityState>,
+    quality_index: usize,
     pub hits: u64,
     pub misses: u64,
 }
 impl Scene {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, backend: wgpu::Backend) -> Self {
         Self {
-            pipeline: Pipeline::new(device, format),
+            pipeline: Pipeline::new(device, format, backend),
             source: None,
             snapshot: None,
             scratch: Vec::new(),
             cache: Vec::new(),
+            quality: Vec::new(),
+            quality_index: 0,
             hits: 0,
             misses: 0,
         }
     }
     pub fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+        self.quality_index = 0;
         if self
             .source
             .as_ref()
@@ -553,6 +606,7 @@ impl Scene {
             self.snapshot = None;
             self.cache.clear();
             self.scratch.clear();
+            self.quality.clear();
         }
     }
     fn apply_uniform(
@@ -585,35 +639,18 @@ impl Scene {
             return;
         }
         self.misses += 1;
-        let mut take = || {
-            let mut target = self
-                .scratch
-                .iter()
-                .position(|target| target.capacity[0] >= size[0] && target.capacity[1] >= size[1])
-                .map(|index| self.scratch.swap_remove(index))
-                .unwrap_or_else(|| self.pipeline.pooled_target(device, size));
-            target.size = size;
-            target
-        };
-        let downsample = take();
-        let horizontal = take();
-        let recycled = if self.cache.len() >= 16 {
-            let target = self.cache.remove(0).1;
-            (target.capacity[0] >= size[0] && target.capacity[1] >= size[1]).then_some(target)
-        } else {
-            None
-        };
-        let mut output = recycled.unwrap_or_else(&mut take);
-        output.size = size;
-        self.pipeline
-            .pass(device, encoder, source, &downsample.view, size, 0.0, true);
+        // Filter an axis before reducing it. Reducing the untouched axis
+        // first would fold fine detail into false low frequencies or DC.
+        let horizontal_size = [size[0], source.size[1]];
+        let horizontal = take_target(&self.pipeline, device, &mut self.scratch, horizontal_size);
+        let output = take_target(&self.pipeline, device, &mut self.scratch, size);
         self.pipeline.pass(
             device,
             encoder,
-            &downsample,
+            source,
             &horizontal.view,
-            size,
-            sigma * size[0] as f32 / source.size[0] as f32,
+            horizontal_size,
+            sigma,
             true,
         );
         self.pipeline.pass(
@@ -622,7 +659,7 @@ impl Scene {
             &horizontal,
             &output.view,
             size,
-            sigma * size[1] as f32 / source.size[1] as f32,
+            sigma,
             false,
         );
         self.pipeline.pass(
@@ -634,15 +671,16 @@ impl Scene {
             0.0,
             true,
         );
-        recycle_target(&mut self.scratch, downsample);
         recycle_target(&mut self.scratch, horizontal);
-        while self
-            .cache
-            .iter()
-            .map(|(_, target)| target.bytes())
-            .sum::<usize>()
-            + output.bytes()
-            > 64 * 1024 * 1024
+        while !self.cache.is_empty()
+            && (self.cache.len() >= 16
+                || self
+                    .cache
+                    .iter()
+                    .map(|(_, target)| target.bytes())
+                    .sum::<usize>()
+                    + output.bytes()
+                    > 64 * 1024 * 1024)
         {
             drop(self.cache.remove(0));
         }
@@ -659,6 +697,9 @@ impl Scene {
     /// Filters a local region while keeping its entire lower scene immutable.
     /// Only the bounded cache and one axis tile are retained in addition to two
     /// viewport targets. No CPU readback or progressively modified neighbors.
+    /// Returns the selected material quality for downstream scene fingerprints,
+    /// or `None` when no pixels can change. Legacy uniform reduction is already
+    /// deterministic from the source size and profile in its cache key.
     pub fn apply(
         &mut self,
         device: &wgpu::Device,
@@ -666,13 +707,14 @@ impl Scene {
         key: Option<u64>,
         backdrop: renderer::Backdrop,
         clip: Rectangle,
-    ) {
+    ) -> Option<f32> {
         use crate::core::blur::Direction;
+        use crate::core::glass::Quality;
         let source = self.source.as_ref().expect("scene target");
         let viewport =
             Rectangle::with_size(Size::new(source.size[0] as f32, source.size[1] as f32));
         let Some(clip) = clip.intersection(&viewport) else {
-            return;
+            return None;
         };
         let Some(visible) = backdrop
             .bounds
@@ -680,27 +722,55 @@ impl Scene {
             .intersection(&clip)
             .and_then(|bounds| bounds.intersection(&viewport))
         else {
-            return;
+            return None;
         };
-        if backdrop.blur.maximum() <= 0.0 {
-            return;
+        if backdrop.blur.maximum() <= 0.0 && backdrop.optics.is_none() {
+            return None;
         }
 
-        // Preserve the established reduction path for an unmasked full scene.
-        if backdrop.bounds == viewport
-            && clip.intersection(&viewport) == Some(viewport)
+        // Keep independent, bounded quality histories for each effect's draw
+        // ordinal. Optics-only changes do not invalidate the convolution.
+        let history_key = key.map(|key| fingerprint(&(key, backdrop.bounds, backdrop.blur)));
+        let mut temporary = crate::graphics::glass::QualityState::default();
+        let history = if self.quality_index < 32 {
+            if self.quality.len() <= self.quality_index {
+                self.quality
+                    .push(crate::graphics::glass::QualityState::default());
+            }
+            &mut self.quality[self.quality_index]
+        } else {
+            &mut temporary
+        };
+        self.quality_index += 1;
+        let requested = history.resolve(
+            backdrop.quality,
+            history_key,
+            visible.width * visible.height,
+            backdrop.blur.maximum(),
+        );
+        let resolution = if matches!(backdrop.blur, Blur::Uniform(radius) if radius >= 2.0) {
+            requested
+        } else {
+            1.0
+        };
+
+        // Preserve the established reduction path for legacy full-scene blur.
+        if backdrop.optics.is_none()
+            && backdrop.quality == Quality::Quality
+            && backdrop.bounds == viewport
+            && clip == viewport
             && <[f32; 4]>::from(backdrop.border_radius) == [0.0; 4]
             && let Blur::Uniform(radius) = backdrop.blur
         {
-            self.apply_uniform(device, encoder, key, radius);
-            return;
+            self.apply_uniform(device, encoder, history_key, radius);
+            return Some(1.0);
         }
         let left = visible.x.floor().max(0.0) as u32;
         let top = visible.y.floor().max(0.0) as u32;
         let right = (visible.x + visible.width).ceil().min(viewport.width) as u32;
         let bottom = (visible.y + visible.height).ceil().min(viewport.height) as u32;
         if left >= right || top >= bottom {
-            return;
+            return None;
         }
 
         let snapshot = self
@@ -717,10 +787,16 @@ impl Scene {
         );
         let horizontal = !matches!(backdrop.blur,
             Blur::Linear(linear) if linear.direction == Direction::Vertical);
-        // The fixed tap count samples at least +/-24 pixels. Include a bilinear
-        // texel beyond the support so tile edges never become filter edges.
+        // Align every tile to one scene-wide reduced grid. Fractional quality
+        // scales therefore do not create different sampling phases at seams.
+        let grid_size = [
+            (viewport.width * resolution).ceil().max(1.0) as u32,
+            (viewport.height * resolution).ceil().max(1.0) as u32,
+        ];
         let halo = (backdrop.blur.maximum() * 3.0).max(24.0).ceil() as u32;
         let halo = halo.saturating_add(1);
+        let refraction = backdrop.optics.map_or(0.0, |optics| optics.refraction);
+        let gutter = (refraction + 1.0 / resolution).ceil() as u32;
         const TILE: u32 = 512;
         for y in (top..bottom).step_by(TILE as usize) {
             for x in (left..right).step_by(TILE as usize) {
@@ -730,7 +806,45 @@ impl Scene {
                     width: (right - x).min(TILE),
                     height: (bottom - y).min(TILE),
                 };
-                let tile_key = key.map(|key| fingerprint(&(key, backdrop, clip, tile)));
+                if backdrop.blur.maximum() <= 0.0 {
+                    self.pipeline.composite(
+                        device,
+                        encoder,
+                        snapshot,
+                        snapshot,
+                        &source.view,
+                        tile,
+                        viewport,
+                        backdrop,
+                        clip,
+                    );
+                    continue;
+                }
+                let gx = (x.saturating_sub(gutter) as f32 * resolution).floor() as u32;
+                let gy = (y.saturating_sub(gutter) as f32 * resolution).floor() as u32;
+                let gr = (((x + tile.width).saturating_add(gutter).min(source.size[0]) as f32
+                    * resolution)
+                    .ceil() as u32)
+                    .min(grid_size[0]);
+                let gb = (((y + tile.height).saturating_add(gutter).min(source.size[1]) as f32
+                    * resolution)
+                    .ceil() as u32)
+                    .min(grid_size[1]);
+                let filtered_region = Rectangle {
+                    x: gx,
+                    y: gy,
+                    width: gr - gx,
+                    height: gb - gy,
+                };
+                let sample_region = Rectangle::new(
+                    Point::new(gx as f32 / resolution, gy as f32 / resolution),
+                    Size::new(
+                        filtered_region.width as f32 / resolution,
+                        filtered_region.height as f32 / resolution,
+                    ),
+                );
+                let tile_key = history_key
+                    .map(|key| fingerprint(&(key, filtered_region, resolution.to_bits())));
                 let found = tile_key.and_then(|key| {
                     self.cache
                         .iter()
@@ -741,25 +855,55 @@ impl Scene {
                     self.cache.remove(index).1
                 } else {
                     self.misses += 1;
-                    let (a, b) = if horizontal {
+                    // Keep the still-unfiltered axis on the original pixel
+                    // grid. Only the filtered axis can safely be reduced.
+                    let (size, region, second_region, second_reference) = if horizontal {
+                        let top = (sample_region.y.floor().max(0.0) as u32).saturating_sub(halo);
+                        let bottom = ((sample_region.y + sample_region.height).ceil() as u32)
+                            .saturating_add(halo)
+                            .min(source.size[1]);
+                        let size = [filtered_region.width, bottom - top];
                         (
-                            Point::new(x as f32, y.saturating_sub(halo) as f32),
-                            Point::new(
-                                (x + tile.width) as f32,
-                                (y + tile.height).saturating_add(halo).min(source.size[1]) as f32,
+                            size,
+                            Rectangle::new(
+                                Point::new(sample_region.x, top as f32),
+                                Size::new(sample_region.width, size[1] as f32),
                             ),
+                            Rectangle::new(
+                                Point::new(0.0, sample_region.y - top as f32),
+                                Size::new(size[0] as f32, sample_region.height),
+                            ),
+                            Rectangle {
+                                x: (backdrop.bounds.x - sample_region.x) * resolution,
+                                y: backdrop.bounds.y - top as f32,
+                                width: backdrop.bounds.width * resolution,
+                                height: backdrop.bounds.height,
+                            },
                         )
                     } else {
+                        let left = (sample_region.x.floor().max(0.0) as u32).saturating_sub(halo);
+                        let right = ((sample_region.x + sample_region.width).ceil() as u32)
+                            .saturating_add(halo)
+                            .min(source.size[0]);
+                        let size = [right - left, filtered_region.height];
                         (
-                            Point::new(x.saturating_sub(halo) as f32, y as f32),
-                            Point::new(
-                                (x + tile.width).saturating_add(halo).min(source.size[0]) as f32,
-                                (y + tile.height) as f32,
+                            size,
+                            Rectangle::new(
+                                Point::new(left as f32, sample_region.y),
+                                Size::new(size[0] as f32, sample_region.height),
                             ),
+                            Rectangle::new(
+                                Point::new(sample_region.x - left as f32, 0.0),
+                                Size::new(sample_region.width, size[1] as f32),
+                            ),
+                            Rectangle {
+                                x: backdrop.bounds.x - left as f32,
+                                y: (backdrop.bounds.y - sample_region.y) * resolution,
+                                width: backdrop.bounds.width,
+                                height: backdrop.bounds.height * resolution,
+                            },
                         )
                     };
-                    let region = Rectangle::new(a, Size::new(b.x - a.x, b.y - a.y));
-                    let size = [region.width as u32, region.height as u32];
                     let intermediate = take_target(&self.pipeline, device, &mut self.scratch, size);
                     self.pipeline.profile_pass(
                         device,
@@ -777,24 +921,17 @@ impl Scene {
                         &self.pipeline,
                         device,
                         &mut self.scratch,
-                        [tile.width, tile.height],
+                        [filtered_region.width, filtered_region.height],
                     );
                     self.pipeline.profile_pass(
                         device,
                         encoder,
                         &intermediate,
                         &output.view,
-                        Rectangle::with_size(Size::new(tile.width, tile.height)),
-                        Rectangle::new(
-                            Point::new(x as f32 - a.x, y as f32 - a.y),
-                            Size::new(tile.width as f32, tile.height as f32),
-                        ),
+                        Rectangle::with_size(Size::new(output.size[0], output.size[1])),
+                        second_region,
                         backdrop.blur,
-                        Rectangle {
-                            x: backdrop.bounds.x - a.x,
-                            y: backdrop.bounds.y - a.y,
-                            ..backdrop.bounds
-                        },
+                        second_reference,
                         !horizontal,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     );
@@ -808,6 +945,7 @@ impl Scene {
                     &output,
                     &source.view,
                     tile,
+                    sample_region,
                     backdrop,
                     clip,
                 );
@@ -824,12 +962,15 @@ impl Scene {
                     {
                         drop(self.cache.remove(0));
                     }
-                    self.cache.push((key, output));
+                    if output.bytes() <= 64 * 1024 * 1024 {
+                        self.cache.push((key, output));
+                    }
                 } else {
                     recycle_target(&mut self.scratch, output);
                 }
             }
         }
+        Some(resolution)
     }
     pub fn bytes(&self) -> usize {
         self.source.as_ref().map_or(0, Target::bytes)

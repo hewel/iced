@@ -22,22 +22,5 @@ struct Parameters {
     var fraction = select(0.0, 1.0, position >= start);
     if end > start { fraction = clamp((position - start) / (end - start), 0.0, 1.0); }
     let sigma = mix(parameters.profile.x, parameters.profile.y, fraction);
-    let dimensions = parameters.source.zw;
-    let low = vec2(0.5) / dimensions;
-    let high = (parameters.source.xy - vec2(0.5)) / dimensions;
-    let uv = point / dimensions;
-    if sigma < 0.01 {
-        return textureSampleLevel(image, image_sampler, clamp(uv, low, high), 0, 0.0);
-    }
-    let direction = select(vec2(0.0, 1.0), vec2(1.0, 0.0), parameters.axis.x > 0.5) / dimensions;
-    let step = max(1.0, sigma * 3.0 / 24.0);
-    var result = vec4(0.0);
-    var total = 0.0;
-    for (var i = -24; i <= 24; i++) {
-        let distance = f32(i) * step;
-        let weight = exp(-0.5 * distance * distance / (sigma * sigma));
-        result += textureSampleLevel(image, image_sampler, clamp(uv + direction * distance, low, high), 0, 0.0) * weight;
-        total += weight;
-    }
-    return result / total;
+    return gaussian(point, parameters.source.xy, parameters.source.zw, sigma, parameters.axis.x > 0.5);
 }

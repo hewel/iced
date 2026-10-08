@@ -12,6 +12,7 @@ pub struct Engine {
     pub(crate) queue: wgpu::Queue,
     pub(crate) queue_synchronization: Option<Arc<dyn crate::QueueSynchronization>>,
     pub(crate) format: wgpu::TextureFormat,
+    pub(crate) backend: wgpu::Backend,
 
     pub(crate) quad_pipeline: quad::Pipeline,
     pub(crate) text_pipeline: text::Pipeline,
@@ -70,6 +71,7 @@ impl Engine {
     ) -> Self {
         Self {
             format,
+            backend: _adapter.get_info().backend,
 
             quad_pipeline: quad::Pipeline::new(&device, format),
             text_pipeline: text::Pipeline::new(&device, &queue, format),

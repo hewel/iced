@@ -531,6 +531,7 @@ pub use crate::core::animation;
 pub use crate::core::blur;
 pub use crate::core::border;
 pub use crate::core::color;
+pub use crate::core::glass;
 pub use crate::core::gradient;
 pub use crate::core::padding;
 pub use crate::core::theme;

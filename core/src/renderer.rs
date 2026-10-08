@@ -118,7 +118,7 @@ pub trait Renderer: 'static {
 }
 
 /// A rounded region of the live lower scene to blur before drawing foreground.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Backdrop {
     /// Logical effect bounds and the blur profile's reference frame.
     pub bounds: Rectangle,
@@ -128,6 +128,10 @@ pub struct Backdrop {
     pub border_radius: crate::border::Radius,
     /// Corner smoothing of the effect mask, normalized to `0..=1`.
     pub border_smoothing: f32,
+    /// Optional glass material applied to the sampled lower scene.
+    pub optics: Option<crate::glass::Optics>,
+    /// Processing quality for glass blur; masks and foreground remain full resolution.
+    pub quality: crate::glass::Quality,
 }
 
 /// Cumulative blur cache activity and current resident blur memory.

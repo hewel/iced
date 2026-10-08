@@ -232,6 +232,8 @@ fn variable_axis(
 pub struct Scene {
     entries: Vec<SceneEntry>,
     scratch: Vec<u32>,
+    quality: Vec<crate::graphics::glass::QualityState>,
+    quality_index: usize,
     pub hits: u64,
     pub misses: u64,
 }
@@ -240,6 +242,9 @@ pub struct Scene {
 struct SceneEntry {
     width: u32,
     height: u32,
+    output_width: u32,
+    output_height: u32,
+    resolution: f32,
     blur: Blur,
     reference: Rectangle,
     input: Vec<u32>,
@@ -247,6 +252,14 @@ struct SceneEntry {
 }
 
 impl Scene {
+    pub fn begin_frame(&mut self) {
+        self.quality_index = 0;
+    }
+
+    pub fn finish_frame(&mut self) {
+        self.quality.truncate(self.quality_index);
+    }
+
     pub fn retained_bytes(&self) -> usize {
         self.scratch.capacity() * 4
             + self
@@ -292,9 +305,39 @@ impl Scene {
             self.scratch = Vec::new();
         }
         let input: &[u32] = bytemuck::cast_slice(pixels.data_mut());
+        if self.quality_index == self.quality.len() {
+            self.quality.push(Default::default());
+        }
+        let source_key =
+            matches!(backdrop.quality, crate::core::glass::Quality::Adaptive).then(|| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = rustc_hash::FxHasher::default();
+                (width, height).hash(&mut hasher);
+                input.hash(&mut hasher);
+                hasher.finish()
+            });
+        let resolution = self.quality[self.quality_index].resolve(
+            backdrop.quality,
+            source_key,
+            width as f32 * height as f32,
+            backdrop.blur.maximum(),
+        );
+        self.quality_index += 1;
+        // A progressive rendition contains sharp regions; its physical sampling
+        // grid remains full resolution, as does a clear refractive material.
+        let resolution = if matches!(backdrop.blur, Blur::Uniform(sigma) if sigma >= 2.0) {
+            resolution
+        } else {
+            1.0
+        };
+        let output_width = (width as f32 * resolution).ceil().max(1.0) as u32;
+        let output_height = (height as f32 * resolution).ceil().max(1.0) as u32;
         let found = self.entries.iter().position(|entry| {
             entry.width == width
                 && entry.height == height
+                && entry.output_width == output_width
+                && entry.output_height == output_height
+                && entry.resolution == resolution
                 && entry.blur == backdrop.blur
                 && entry.reference == reference
                 && entry.input == input
@@ -307,7 +350,8 @@ impl Scene {
             // At most four snapshots and 64 MiB, except one viewport snapshot
             // together with its scratch buffer. Compare the complete lower scene:
             // pixels outside the output mask still contribute through the halo.
-            let bytes = input.len() * 12;
+            let output_len = output_width as usize * output_height as usize;
+            let bytes = (input.len() + output_len * 2) * 4;
             let mut entry =
                 if self.entries.len() >= 4 || self.retained_bytes() + bytes > 64 * 1024 * 1024 {
                     if self.entries.is_empty() {
@@ -321,6 +365,9 @@ impl Scene {
                 .unwrap_or_else(|| SceneEntry {
                     width,
                     height,
+                    output_width,
+                    output_height,
+                    resolution,
                     blur: backdrop.blur,
                     reference,
                     input: Vec::new(),
@@ -328,21 +375,38 @@ impl Scene {
                 });
             entry.width = width;
             entry.height = height;
+            entry.output_width = output_width;
+            entry.output_height = output_height;
+            entry.resolution = resolution;
             entry.blur = backdrop.blur;
             entry.reference = reference;
             entry.input.clear();
             entry.input.extend_from_slice(input);
             entry.output.clear();
-            entry.output.extend_from_slice(input);
-            progressive_filter(
-                &mut entry.output,
-                &mut self.scratch,
-                width as usize,
-                height as usize,
-                backdrop.blur,
-                Point::ORIGIN,
-                reference,
-            );
+            if output_width == width && output_height == height {
+                entry.output.extend_from_slice(input);
+            } else {
+                entry.output.resize(output_len, 0);
+                downsample(
+                    input,
+                    width,
+                    height,
+                    &mut entry.output,
+                    output_width,
+                    output_height,
+                );
+            }
+            if backdrop.blur.maximum() > 0.0 {
+                progressive_filter(
+                    &mut entry.output,
+                    &mut self.scratch,
+                    output_width as usize,
+                    output_height as usize,
+                    backdrop.blur.scaled(resolution),
+                    Point::ORIGIN,
+                    reference * resolution,
+                );
+            }
             let entry_bytes = (entry.input.capacity() + entry.output.capacity()) * 4;
             while !self.entries.is_empty() && self.retained_bytes() + entry_bytes > 64 * 1024 * 1024
             {
@@ -364,17 +428,109 @@ impl Scene {
                     continue;
                 }
                 let original = target[index].to_ne_bytes();
-                let blurred = output[index].to_ne_bytes();
+                let (sample_point, highlight, shadow) = backdrop
+                    .optics
+                    .map(|optics| crate::graphics::glass::offset(&shape, point, optics))
+                    .unwrap_or((point, 0.0, 0.0));
+                let sample_point = Point::new(
+                    sample_point.x * output_width as f32 / width as f32,
+                    sample_point.y * output_height as f32 / height as f32,
+                );
+                let mut blurred = if backdrop.optics.is_none()
+                    && output_width == width
+                    && output_height == height
+                {
+                    output[index].to_ne_bytes().map(f32::from)
+                } else {
+                    sample(output, output_width, output_height, sample_point)
+                        .map(|channel| channel * 255.0)
+                };
+                if let Some(optics) = backdrop.optics {
+                    // Software surface pixels are BGRA; material shading uses RGBA.
+                    let color = crate::graphics::glass::shade(
+                        [blurred[2], blurred[1], blurred[0], blurred[3]]
+                            .map(|channel| channel / 255.0),
+                        optics,
+                        highlight,
+                        shadow,
+                    );
+                    blurred =
+                        [color[2], color[1], color[0], color[3]].map(|channel| channel * 255.0);
+                }
                 // This is a replacement of the lower scene, including alpha.
                 // Source-over would composite a semitransparent background twice.
                 target[index] = u32::from_ne_bytes(std::array::from_fn(|channel| {
-                    (f32::from(original[channel]) * (1.0 - coverage)
-                        + f32::from(blurred[channel]) * coverage)
+                    (f32::from(original[channel]) * (1.0 - coverage) + blurred[channel] * coverage)
                         .round() as u8
                 }));
             }
         }
     }
+}
+
+/// Integrates each output pixel's source footprint before reducing resolution.
+/// Point sampling can change the average of repetitive detail before the blur
+/// has a chance to remove it. All premultiplied channels use the same coverage;
+/// the existing reduced output allocation is the only destination buffer.
+fn downsample(
+    source: &[u32],
+    width: u32,
+    height: u32,
+    target: &mut [u32],
+    target_width: u32,
+    target_height: u32,
+) {
+    let scale_x = f64::from(width) / f64::from(target_width);
+    let scale_y = f64::from(height) / f64::from(target_height);
+    for y in 0..target_height {
+        let top = f64::from(y) * scale_y;
+        let bottom = (f64::from(y) + 1.0) * scale_y;
+        for x in 0..target_width {
+            let left = f64::from(x) * scale_x;
+            let right = (f64::from(x) + 1.0) * scale_x;
+            let mut sum = [0.0; 4];
+            for source_y in top.floor() as u32..(bottom.ceil() as u32).min(height) {
+                let coverage_y =
+                    bottom.min(f64::from(source_y) + 1.0) - top.max(f64::from(source_y));
+                for source_x in left.floor() as u32..(right.ceil() as u32).min(width) {
+                    let coverage_x =
+                        right.min(f64::from(source_x) + 1.0) - left.max(f64::from(source_x));
+                    let coverage = coverage_x * coverage_y;
+                    let pixel = source[source_y as usize * width as usize + source_x as usize]
+                        .to_ne_bytes();
+                    for channel in 0..4 {
+                        sum[channel] += f64::from(pixel[channel]) * coverage;
+                    }
+                }
+            }
+            target[y as usize * target_width as usize + x as usize] = u32::from_ne_bytes(
+                sum.map(|channel| (channel / (scale_x * scale_y)).round() as u8),
+            );
+        }
+    }
+}
+
+/// Edge-clamped, premultiplied bilinear sampling. Reads only the immutable
+/// lower-scene rendition, even when output and refracted source regions overlap.
+fn sample(pixels: &[u32], width: u32, height: u32, point: Point) -> [f32; 4] {
+    let x = (point.x - 0.5).clamp(0.0, width.saturating_sub(1) as f32);
+    let y = (point.y - 0.5).clamp(0.0, height.saturating_sub(1) as f32);
+    let left = x.floor() as u32;
+    let top = y.floor() as u32;
+    let right = left.saturating_add(1).min(width - 1);
+    let bottom = top.saturating_add(1).min(height - 1);
+    let tx = x - left as f32;
+    let ty = y - top as f32;
+    let pixel = |x: u32, y: u32| pixels[y as usize * width as usize + x as usize].to_ne_bytes();
+    let a = pixel(left, top);
+    let b = pixel(right, top);
+    let c = pixel(left, bottom);
+    let d = pixel(right, bottom);
+    std::array::from_fn(|channel| {
+        ((f32::from(a[channel]) * (1.0 - tx) + f32::from(b[channel]) * tx) * (1.0 - ty)
+            + (f32::from(c[channel]) * (1.0 - tx) + f32::from(d[channel]) * tx) * ty)
+            / 255.0
+    })
 }
 
 #[cfg(all(test, feature = "image"))]

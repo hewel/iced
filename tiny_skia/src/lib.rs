@@ -84,6 +84,7 @@ impl Renderer {
             damage
         };
         self.had_backdrop = has_backdrop;
+        self.scene_blur.begin_frame();
 
         for &damage_bounds in damage {
             let damage_bounds = damage_bounds * scale_factor;
@@ -126,6 +127,7 @@ impl Renderer {
                         renderer::Backdrop {
                             bounds: backdrop.bounds * scale_factor,
                             blur: backdrop.blur.scaled(scale_factor),
+                            optics: backdrop.optics.map(|optics| optics.scaled(scale_factor)),
                             border_radius: engine::scaled_radius(
                                 backdrop.border_radius,
                                 scale_factor,
@@ -215,6 +217,7 @@ impl Renderer {
         }
 
         self.engine.trim();
+        self.scene_blur.finish_frame();
     }
 }
 
@@ -228,17 +231,24 @@ impl core::Renderer for Renderer {
                 blur: blur.scaled(transformation.scale_factor().abs()),
                 border_radius: 0.0.into(),
                 border_smoothing: 0.0,
+                optics: None,
+                quality: core::glass::Quality::default(),
             });
         }
     }
 
     fn draw_backdrop(&mut self, backdrop: renderer::Backdrop) {
         let blur = backdrop.blur.normalized();
-        if blur.maximum() > 0.0 {
+        let optics = backdrop
+            .optics
+            .map(core::glass::Optics::normalized)
+            .filter(|optics| optics.is_visible());
+        if blur.maximum() > 0.0 || optics.is_some() {
             let (layer, transformation) = self.layers.barrier();
             layer.backdrop_blur = Some(renderer::Backdrop {
                 bounds: backdrop.bounds * transformation,
                 blur: blur.scaled(transformation.scale_factor().abs()),
+                optics: optics.map(|optics| optics.scaled(transformation.scale_factor().abs())),
                 border_radius: engine::scaled_radius(
                     backdrop.border_radius,
                     transformation.scale_factor(),

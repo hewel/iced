@@ -26,6 +26,7 @@ pub mod combo_box;
 pub mod component;
 pub mod container;
 pub mod float;
+pub mod glass;
 pub mod grid;
 pub mod keyed;
 pub mod lazy;
@@ -53,6 +54,7 @@ pub mod vertical_slider;
 mod helpers;
 
 pub use backdrop::backdrop;
+pub use glass::glass;
 pub use helpers::*;
 pub use modal::modal;
 
@@ -72,6 +74,8 @@ pub use component::Component;
 pub use container::Container;
 #[doc(no_inline)]
 pub use float::Float;
+#[doc(no_inline)]
+pub use glass::Glass;
 #[doc(no_inline)]
 pub use grid::Grid;
 #[doc(no_inline)]

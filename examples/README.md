@@ -154,6 +154,8 @@ Visual acceptance is a separate manual check on each backend:
 
 - Compare fine lines at the clear end with the Original sample, including at
   maximum blur. Reverse and change direction to inspect all four edges.
+- Pause motion and sweep the blur radius over fine repeated detail. The blurred
+  region should stay smooth, without stripes returning at particular radii.
 - Scroll inside the lower scene and watch the moving tile pass under both
   panels. Check the overlap, rounded corners, and the clipped window edge.
 - Pause motion, leave the scroll position still, and type in the rear panel
@@ -168,6 +170,59 @@ visual quality, or interactive frame time on a particular device.
 
 `cargo run --package native_blur` still opens the original uniform image blur,
 same-source glass, modal backdrop, and toast example.
+
+## Glass materials
+
+```sh
+ICED_BACKEND=wgpu cargo run --package native_blur --bin glass_playground
+ICED_BACKEND=tiny-skia cargo run --package native_blur --bin glass_playground
+```
+
+Compare the regular and clear glass presets over the same native text, images,
+scrollable cards, and synchronized moving shape. Each scene scrolls independently.
+The panel contains a focusable text input; the smaller glass surface wraps a
+transparent native button. Notes and button counts are local demo state.
+
+Refraction, depth, and tint controls multiply each preset's values: 100% keeps
+the preset, while 0% disables that contribution. This preserves the distinction
+between the materials. Refraction and edge depth are logical-pixel lengths;
+regular glass also adapts its blur and edge depth to the surface size. The light
+angle sets the lighting direction before any pointer feedback.
+
+The quality selector chooses the blur-processing policy, including a fixed 50%
+resolution option. It does not lower the foreground's resolution or promise a
+particular frame rate. Adaptive mode can choose its processing resolution from
+the surface and changing background; evaluate its transitions on the target
+device.
+
+Accessibility toggles are explicit application preferences in this example,
+not automatic detection of operating-system settings. Reduce motion also pauses
+the animated scenery. Turning off interaction feedback leaves the input and
+button functional.
+
+Manual acceptance on each backend:
+
+- Scroll each scene and watch the moving shape cross the panel and button.
+  Inspect refraction and lighting around rounded edges while the foreground
+  text remains sharp.
+- Adjust light angle, refraction, and depth. At 0% refraction there should be no
+  displacement; tint and edge lighting can remain visible. At maximum depth,
+  inspect the panel center and diagonals for lighting creases or folded detail.
+- Hover and hold a glass button, release inside and outside it, and check that
+  only an activated button changes its count. Click or Tab into both inputs,
+  type, and inspect focus feedback without changing their hit areas.
+- Pause scenery and type or press a button. Stationary background content
+  should remain unchanged while the foreground updates.
+- Try reduced motion, reduced transparency, and increased contrast separately
+  and together. Check text readability, an opaque reduced-transparency surface,
+  and functional keyboard interaction.
+- Switch quality modes, resize the window, and repeat at fractional display
+  scaling. Check for seams, corner leaks, stale captures, or disruptive changes
+  when the scene starts or stops moving. Fine background detail should retain
+  its average brightness when the processing resolution changes.
+
+These checks establish neither a benchmark nor visual acceptance until they
+are performed on the intended device.
 
 ## Extras
 A bunch of simpler examples exist:

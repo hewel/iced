@@ -134,6 +134,8 @@ where
                 blur: self.blur,
                 border_radius: self.border_radius,
                 border_smoothing: self.border_smoothing,
+                optics: None,
+                quality: Default::default(),
             });
             if let Some(tint) = self.tint {
                 renderer.fill_quad(

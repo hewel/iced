@@ -350,6 +350,7 @@ fn effect(blur: Blur) -> Backdrop {
         blur,
         border_radius: 12.0.into(),
         border_smoothing: 0.6,
+        ..Default::default()
     }
 }
 
@@ -457,6 +458,7 @@ fn backdrop_masks_and_profiles_follow_renderer_scale_and_translation() {
         blur: profile,
         border_radius: 8.0.into(),
         border_smoothing: 0.6,
+        ..Default::default()
     };
     renderer.with_translation(iced_core::Vector::new(16.0, 8.0), |renderer| {
         renderer.with_transformation(Transformation::scale(2.0), |renderer| {
@@ -470,6 +472,7 @@ fn backdrop_masks_and_profiles_follow_renderer_scale_and_translation() {
         blur: profile.scaled(2.0),
         border_radius: 16.0.into(),
         border_smoothing: 0.6,
+        ..Default::default()
     });
     let b = renderer.screenshot(Size::new(128, 128), 1.0, Color::TRANSPARENT);
     assert_eq!(a, b);
@@ -493,6 +496,7 @@ fn overlapping_backdrops_sample_intermediate_foreground_in_draw_order() {
             blur: Blur::horizontal_gradient(6.0, 10.0),
             border_radius: 0.0.into(),
             border_smoothing: 0.0,
+            ..Default::default()
         });
         renderer.fill_quad(
             Quad {
@@ -595,7 +599,13 @@ fn live_custom_primitive_updates_backdrop_without_changing_its_identity() {
         let bounds = rect(0.0, 0.0, 128.0, 128.0);
         renderer.reset(bounds);
         renderer.draw_primitive(bounds, LiveFrame(frame.clone()));
-        renderer.draw_backdrop(effect(Blur::vertical_gradient(0.0, 12.0)));
+        renderer.draw_backdrop(Backdrop {
+            optics: Some(iced_core::glass::Optics {
+                refraction: 8.0,
+                ..Default::default()
+            }),
+            ..effect(Blur::vertical_gradient(0.0, 12.0))
+        });
         let pixels =
             Headless::screenshot(&mut renderer, Size::new(128, 128), 1.0, Color::TRANSPARENT);
         assert_eq!(

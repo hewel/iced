@@ -450,9 +450,9 @@ impl Renderer {
             .any(|layer| layer.backdrop_blur.is_some());
         let size = [viewport.physical_width(), viewport.physical_height()];
         let intermediate = if scene {
-            let state = self
-                .scene_blur
-                .get_or_insert_with(|| blur::Scene::new(&self.engine.device, self.engine.format));
+            let state = self.scene_blur.get_or_insert_with(|| {
+                blur::Scene::new(&self.engine.device, self.engine.format, self.engine.backend)
+            });
             state.resize(&self.engine.device, size);
             Some(state.source.as_ref().unwrap().view.clone())
         } else {
@@ -526,16 +526,23 @@ impl Renderer {
                     backdrop.bounds * scale_factor
                 };
                 backdrop.blur = backdrop.blur.scaled(scale_factor);
+                backdrop.optics = backdrop.optics.map(|optics| optics.scaled(scale_factor));
                 backdrop.border_radius = backdrop.border_radius * scale_factor;
                 let clip = layer.bounds * scale_factor;
+                let lower_scene_key = cacheable.then_some(prefix);
                 prefix = blur::fingerprint(&(prefix, backdrop, clip));
-                self.scene_blur.as_mut().unwrap().apply(
+                let resolution = self.scene_blur.as_mut().unwrap().apply(
                     &self.engine.device,
                     encoder,
-                    cacheable.then_some(prefix),
+                    lower_scene_key,
                     backdrop,
                     clip,
                 );
+                if let Some(resolution) = resolution {
+                    // Adaptive quality can recover on otherwise static input;
+                    // later effects must observe the newly filtered pixels.
+                    prefix = blur::fingerprint(&(prefix, resolution.to_bits()));
+                }
                 render_pass =
                     ManuallyDrop::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("after backdrop blur"),
@@ -866,12 +873,16 @@ impl core::Renderer for Renderer {
             blur: blur.scaled(transformation.scale_factor()),
             border_radius: core::border::Radius::default(),
             border_smoothing: 0.0,
+            optics: None,
+            quality: core::glass::Quality::Quality,
         });
     }
 
     fn draw_backdrop(&mut self, mut backdrop: core::renderer::Backdrop) {
         backdrop.blur = backdrop.blur.normalized();
-        if backdrop.blur.maximum() == 0.0
+        backdrop.quality = backdrop.quality.normalized();
+        backdrop.optics = backdrop.optics.map(core::glass::Optics::normalized);
+        if (backdrop.blur.maximum() == 0.0 && backdrop.optics.is_none())
             || !backdrop.bounds.x.is_finite()
             || !backdrop.bounds.y.is_finite()
             || !backdrop.bounds.width.is_finite()
@@ -888,6 +899,7 @@ impl core::Renderer for Renderer {
         }
         backdrop.bounds = backdrop.bounds * transformation;
         backdrop.blur = backdrop.blur.scaled(scale);
+        backdrop.optics = backdrop.optics.map(|optics| optics.scaled(scale));
         let [top_left, top_right, bottom_right, bottom_left] =
             <[f32; 4]>::from(backdrop.border_radius).map(|radius| {
                 graphics::shape::normalize_length(radius).min(f32::MAX / scale) * scale

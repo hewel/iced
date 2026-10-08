@@ -15,6 +15,7 @@ pub mod cache;
 pub mod color;
 pub mod compositor;
 pub mod damage;
+pub mod glass;
 pub mod gradient;
 pub mod image;
 pub mod layer;

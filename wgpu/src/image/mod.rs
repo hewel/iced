@@ -236,7 +236,11 @@ impl State {
                 |image| matches!(image, Image::Raster { image, .. } if image.blur.maximum() > 0.0),
             )
         {
-            self.blur = Some(crate::blur::Pipeline::new(device, pipeline.format));
+            self.blur = Some(crate::blur::Pipeline::new(
+                device,
+                pipeline.format,
+                pipeline.backend,
+            ));
         }
         let blur = self.blur.as_ref();
         let mut atlas: Option<Arc<wgpu::BindGroup>> = None;
@@ -274,7 +278,17 @@ impl State {
                         }
 
                         let profile = image.blur;
-                        if matches!(profile, crate::core::Blur::Linear(_)) {
+                        let sigma = profile.maximum() * scale;
+                        let rendition_size =
+                            crate::blur::rendition_size([bounds.width, bounds.height], sigma);
+                        // A smaller rendition must be filtered before either
+                        // axis is reduced, otherwise fine source detail aliases
+                        // into a constant that a later blur cannot remove.
+                        if matches!(profile, crate::core::Blur::Linear(_))
+                            || (sigma > 0.0
+                                && ((rendition_size[0] as f32) < bounds.width
+                                    || (rendition_size[1] as f32) < bounds.height))
+                        {
                             layer.push(bind_group, &self.nearest_instances, &self.linear_instances);
                             let (hits, misses) = self.progressive.prepare(
                                 pipeline,
@@ -298,9 +312,7 @@ impl State {
                             self.image_misses += misses;
                         } else if profile.maximum() > 0.0 {
                             let blur = blur.expect("image blur pipeline");
-                            let sigma = profile.maximum() * scale;
-                            let size =
-                                crate::blur::rendition_size([bounds.width, bounds.height], sigma);
+                            let size = rendition_size;
                             let key = crate::blur::fingerprint(&(
                                 image.handle.id(),
                                 revision,
