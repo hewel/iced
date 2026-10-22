@@ -3,8 +3,10 @@ name = "mpv_sdr_gpu"
 version = "0.1.0"
 edition = "2024"
 publish = false
+autotests = false
 
 [dependencies]
+iced = { path = "../..", default-features = false, features = ["wgpu", "advanced", "thread-pool", "x11", "wayland", "web-colors"] }
 iced_winit.workspace = true
 iced_winit.features = ["x11", "wayland"]
 iced_wgpu.workspace = true
@@ -20,3 +22,10 @@ wgpu.workspace = true
 wgpu.features = ["vulkan"]
 tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+iced = { path = "../..", default-features = false, features = ["image"] }
+
+[[example]]
+name = "native_smoke"
+path = "tests/native_smoke.rs"

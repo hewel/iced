@@ -4,11 +4,10 @@ pub struct Video {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    current: Option<wgpu::BindGroup>,
 }
 
 impl Video {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mpv video texture layout"),
             entries: &[
@@ -57,7 +56,7 @@ impl Video {
                 module: &shader,
                 entry_point: Some("fragment_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgb10a2Unorm,
+                    format,
                     // RGB is already premultiplied. Over opaque black this
                     // leaves its gamma-2.2 code values intact and outputs A=1.
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -76,14 +75,13 @@ impl Video {
             pipeline,
             layout,
             sampler,
-            current: None,
         }
     }
 
     /// Binds the application's private GPU copy, never the borrowed mpv image.
     /// The caller records the copy and its synchronization before `draw` and
     /// retains the texture until all commands using it have completed.
-    pub fn set_texture(&mut self, device: &wgpu::Device, texture: &wgpu::Texture) {
+    fn binding(&self, device: &wgpu::Device, texture: &wgpu::Texture) -> wgpu::BindGroup {
         assert_eq!(texture.format(), wgpu::TextureFormat::Rgb10a2Unorm);
         assert_eq!(texture.dimension(), wgpu::TextureDimension::D2);
         assert_eq!(texture.depth_or_array_layers(), 1);
@@ -101,7 +99,7 @@ impl Video {
             mip_level_count: Some(1),
             ..Default::default()
         });
-        self.current = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mpv current private video"),
             layout: &self.layout,
             entries: &[
@@ -114,36 +112,60 @@ impl Video {
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
-        }));
+        })
     }
+}
 
-    /// Clears to opaque black, then draws the current frame if one is bound.
-    /// The caller renders iced afterward with a load operation on this target.
-    /// This method only records commands; queue submission belongs to main.
-    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
-        assert_eq!(target.texture().format(), wgpu::TextureFormat::Rgb10a2Unorm);
+use iced_wgpu::{Primitive, graphics::Viewport, primitive::Pipeline};
+use iced_winit::core::{Rectangle, mouse};
+use std::sync::{Arc, OnceLock};
 
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("mpv video pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        if let Some(current) = &self.current {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, current, &[]);
+#[derive(Debug, Clone)]
+pub(crate) struct Frame {
+    texture: Option<wgpu::Texture>,
+    binding: Arc<OnceLock<wgpu::BindGroup>>,
+}
+impl Frame {
+    pub fn new(texture: Option<wgpu::Texture>) -> Self {
+        Self {
+            texture,
+            binding: Arc::new(OnceLock::new()),
+        }
+    }
+}
+impl Pipeline for Video {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        Self::new(device, format)
+    }
+}
+impl Primitive for Frame {
+    type Pipeline = Video;
+    fn prepare(
+        &self,
+        pipeline: &mut Video,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _bounds: &Rectangle,
+        _viewport: &Viewport,
+    ) {
+        if let Some(texture) = &self.texture {
+            self.binding
+                .get_or_init(|| pipeline.binding(device, texture));
+        }
+    }
+    fn draw(&self, pipeline: &Video, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        if let Some(binding) = self.binding.get() {
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, binding, &[]);
             pass.draw(0..3, 0..1);
         }
+        true
+    }
+}
+impl<Message> iced_widget::shader::Program<Message> for Frame {
+    type State = ();
+    type Primitive = Self;
+    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> Self {
+        self.clone()
     }
 }

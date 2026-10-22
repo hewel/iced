@@ -7,7 +7,14 @@ configuration change.
 
 ## Upstream baseline and provenance
 
-The official baseline for the 2026-10-04 synchronization is
+The 2026-10-22 synchronization merged official
+[`cd04b74ca7073766f654535d6e72c452ef749d07`](https://github.com/iced-rs/iced/commit/cd04b74ca7073766f654535d6e72c452ef749d07)
+into product tip `cc2a15bf5de21c29308e707847ffabab24adf934`, preserving both
+parents in `d1fa18b199453d4aa43ce647778ad0109d05a70e`. All four compile groups
+below passed. Cargo repaired the upstream lockfile's `clap_derive` dependency
+reference from `syn 3.0.6` to the already locked `syn 3.0.9`.
+
+The preceding official baseline for the 2026-10-04 synchronization was
 [`82acd61ea207d6f85b99da5e95b66f9a968de3f2`](https://github.com/iced-rs/iced/commit/82acd61ea207d6f85b99da5e95b66f9a968de3f2),
 verified against the official repository's `refs/heads/master` before merging.
 The previous upstream baseline was `c756d97e98c67b0be78ffdf6f71b577a44fe394c`;
@@ -20,8 +27,8 @@ Recheck evidence rather than inferring ancestry from a release number or subject
 ```sh
 git remote -v
 git log --merges -n 1 --format='%H %P' main
-git merge-base main 82acd61ea207d6f85b99da5e95b66f9a968de3f2
-git log --oneline 82acd61ea207d6f85b99da5e95b66f9a968de3f2..main
+git merge-base main cd04b74ca7073766f654535d6e72c452ef749d07
+git log --oneline cd04b74ca7073766f654535d6e72c452ef749d07..main
 git ls-remote https://github.com/iced-rs/iced.git refs/heads/master
 ```
 
@@ -31,8 +38,8 @@ baseline as unverified; do not substitute an assumed tag or latest release.
 
 This baseline changes custom widget contracts (`Meta`, generic widget content,
 layout stored in `widget::Tree`, and overlay invalidation) and includes upstream
-wgpu 30 support. The fork now uses the official `iced-rs/cryoglyph` revision
-`e13618df29a5593968040c12ab086b7237249ded`; the temporary `hewel/cryoglyph` wgpu-30
+wgpu 30 support. The 2026-10-22 sync uses official `iced-rs/cryoglyph` revision
+`cf38ed5ea0cfe95270b31ced2910560a7fcc5003`; the temporary `hewel/cryoglyph` wgpu-30
 pin is retired. Custom compositor and shared queue contracts below still apply.
 
 The existing fork hashes under `examples/styling/snapshots` and
@@ -114,6 +121,38 @@ The generic factory and optional queue hook are **candidates for discussion with
 upstream**, not accepted upstream APIs or promises of acceptance. Follow
 [CONTRIBUTING.md](CONTRIBUTING.md); propose independently reviewable generic needs,
 not an mpv-specific renderer or a stock format-policy change.
+
+### Native example integration
+
+[`examples/mpv_sdr_gpu`](examples/mpv_sdr_gpu/README.md) now provides a reusable
+`Player` library, normal shader widget, and custom compositor using the existing
+daemon factory and queue hook. Its application no longer implements the winit
+event loop or `UserInterface` lifecycle itself. Playback policy remains in this
+example, not in core iced.
+
+- ABI v1 remains the default; `--host-abi v2` exercises the color-capable legacy
+  prefix and `--host-abi v3` opts into asynchronous timeline handoff. This requires
+  the corresponding mpv fork API; there is no silent ABI fallback.
+- Each of three slots owns a timeline semaphore for the entire host session.
+  mpv waits at `2*n` and signals `2*n+1`; the host copy waits for `2*n+1` and
+  signals `2*n+2`. Only scheduled successful release authorizes a copy. Errors
+  promise no signal and quarantine the session instead of enqueueing a wait.
+- The wgpu 30 Vulkan HAL's one-shot wait/signal attachments and matching submit
+  are one queue-gated transaction. Unconsumed attachments are removed on unwind.
+  The renderer and its image worker share the same `QueueSynchronization`.
+- mpv's wakeup callback drives events. A completion worker sleeps on a channel
+  and waits for specific submitted copies, outside the queue gate. It recycles
+  capacity and wakes the UI only for retry, resize, or failure. There is no 5 ms
+  poll timer, nor any polling, mpv API call, or thread join inside the queue gate.
+- Shutdown stops acquisition, joins mpv, drains and joins the completion worker,
+  then completes outstanding wgpu work before destroying images and semaphores.
+  Resize replaces only idle images and retains semaphore values. The `Player`
+  retains its session when the daemon temporarily has no windows.
+
+The opt-in `native_smoke` executable exercises actual playback, concurrent image
+uploads and screenshots, paused resize/seek, zero-window reopen, stop/reload and
+shutdown. It is separate from ordinary headless tests. Its framebuffer checks
+are not human color/HDR acceptance or the application's joint acceptance.
 
 ## Synchronizing one dependency group
 

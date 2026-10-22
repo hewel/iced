@@ -1,9 +1,9 @@
-use crate::interop::{Command, PlayerEvent};
 use iced_wgpu::Renderer;
 use iced_widget::{
     Widget, bottom, button, checkbox, column, container, row, scrollable, slider, text,
 };
 use iced_winit::core::{Font, Pixels, Theme};
+use mpv_sdr_gpu::{Command, PlayerEvent};
 
 pub struct Controls {
     show_details: bool,

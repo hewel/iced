@@ -893,7 +893,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3297,6 +3297,7 @@ dependencies = [
  "ash",
  "clap",
  "futures",
+ "iced",
  "iced_wgpu",
  "iced_widget",
  "iced_winit",

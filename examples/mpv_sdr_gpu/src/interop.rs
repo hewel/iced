@@ -1,22 +1,25 @@
-use crate::{Options, gpu::DeviceContext};
+use crate::{HostAbi, Settings, completion::Completion, gpu::DeviceContext, pool::Lease};
 use ash::vk;
 use iced_wgpu::wgpu;
 use parking_lot::{Mutex, RawMutex, lock_api::RawMutex as _};
 use std::{
     collections::VecDeque,
     ffi::{CStr, CString, c_char, c_int, c_void},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Command {
     TogglePause,
     SeekAbsolute(f64),
     SeekRelative(f64),
     SetVolume(f64),
+    Stop,
+    LoadFile(String),
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +87,7 @@ struct MpvEventEndFile {
     playlist_insert_num_entries: c_int,
 }
 
-// Exact repr(C) translation of mpv/include/mpv/gpu_next.h version 1.
+// ABI layouts match mpv/include/mpv/gpu_next.h. Older versions only read their prefix.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Target {
@@ -94,6 +97,23 @@ struct Target {
     layout: vk::ImageLayout,
     usage: vk::ImageUsageFlags,
     token: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Frame {
+    target: Target,
+    semaphore: vk::Semaphore,
+    wait_value: u64,
+    signal_value: u64,
+}
+#[repr(C)]
+struct TargetColor {
+    primaries: c_int,
+    transfer: c_int,
+    ref_luma: f32,
+    min_luma: f32,
+    max_luma: f32,
+    depth: c_int,
 }
 #[repr(C)]
 struct Descriptor {
@@ -111,6 +131,9 @@ struct Descriptor {
     unlock_queue: unsafe extern "C" fn(*mut c_void, u32, u32),
     acquire: unsafe extern "C" fn(*mut c_void, *mut Target) -> c_int,
     release: unsafe extern "C" fn(*mut c_void, *const Target, c_int),
+    target_color: Option<unsafe extern "C" fn(*mut c_void, *mut TargetColor)>,
+    acquire_frame: Option<unsafe extern "C" fn(*mut c_void, *mut Frame) -> c_int>,
+    release_frame: Option<unsafe extern "C" fn(*mut c_void, *const Frame, c_int)>,
 }
 
 pub struct QueueLock(RawMutex);
@@ -118,37 +141,58 @@ impl QueueLock {
     fn new() -> Self {
         Self(RawMutex::INIT)
     }
-    pub fn lock(&self) -> QueueGuard<'_> {
-        self.0.lock();
-        QueueGuard(self)
+    pub fn lock(&self) -> iced_wgpu::QueueGuard<'_> {
+        iced_wgpu::QueueGuard::acquire(self)
     }
 }
-pub struct QueueGuard<'a>(&'a QueueLock);
-impl Drop for QueueGuard<'_> {
-    fn drop(&mut self) {
-        unsafe { self.0.0.unlock() }
+// SAFETY: RawMutex provides same-thread, non-reentrant acquire/release exclusion.
+unsafe impl iced_wgpu::QueueSynchronization for QueueLock {
+    fn lock(&self) {
+        self.0.lock();
+    }
+    unsafe fn unlock(&self) {
+        unsafe { self.0.unlock() };
     }
 }
 
 struct Slot {
     target: Target,
     memory: vk::DeviceMemory,
-    busy: bool,
+    lease: Lease,
+    semaphore: vk::Semaphore,
 }
 struct Pool {
     slots: Vec<Slot>,
     ready: VecDeque<usize>,
     stopping: bool,
     size: (u32, u32),
+    error: Option<String>,
 }
 struct Shared {
     raw: ash::Device,
+    _device: wgpu::Device,
+    asynchronous: bool,
     memory: vk::PhysicalDeviceMemoryProperties,
     family: u32,
     queue_lock: Arc<QueueLock>,
     pool: Mutex<Pool>,
     exhausted: AtomicBool,
     wake: Box<dyn Fn() + Send + Sync>,
+}
+
+// The HAL attachments are one-shot queue state. Remove unconsumed entries even
+// if submission validation unwinds, before the enclosing queue gate is released.
+struct SubmissionSync<'a> {
+    queue: &'a wgpu::Queue,
+    semaphore: vk::Semaphore,
+}
+impl Drop for SubmissionSync<'_> {
+    fn drop(&mut self) {
+        if let Some(native) = unsafe { self.queue.as_hal::<wgpu::hal::api::Vulkan>() } {
+            native.remove_wait_semaphore(self.semaphore);
+            native.remove_signal_semaphore(self.semaphore);
+        }
+    }
 }
 impl Shared {
     fn allocate(
@@ -217,7 +261,8 @@ impl Shared {
                     token,
                 },
                 memory,
-                busy: false,
+                lease: Lease::default(),
+                semaphore: vk::Semaphore::null(),
             })
         }
     }
@@ -228,6 +273,7 @@ impl Drop for Shared {
             unsafe {
                 self.raw.destroy_image(slot.target.image, None);
                 self.raw.free_memory(slot.memory, None);
+                self.raw.destroy_semaphore(slot.semaphore, None);
             }
         }
     }
@@ -249,42 +295,97 @@ unsafe extern "C" fn unlock_queue(opaque: *mut c_void, family: u32, index: u32) 
 }
 unsafe extern "C" fn acquire(opaque: *mut c_void, out: *mut Target) -> c_int {
     let shared = unsafe { &*opaque.cast::<Shared>() };
-    let Some(mut pool) = shared.pool.try_lock() else {
-        shared.exhausted.store(true, Ordering::Release);
-        return 0;
-    };
-    if pool.stopping {
-        return 0;
+    match shared.acquire() {
+        Ok(Some(frame)) => {
+            unsafe { out.write(frame.target) };
+            1
+        }
+        Ok(None) => 0,
+        Err(()) => -1,
     }
-    let size = pool.size;
-    let Some(slot) = pool
-        .slots
-        .iter_mut()
-        .find(|s| !s.busy && (s.target.width as u32, s.target.height as u32) == size)
-    else {
-        shared.exhausted.store(true, Ordering::Release);
-        return 0;
-    };
-    slot.busy = true;
-    unsafe { out.write(slot.target) };
-    1
+}
+unsafe extern "C" fn acquire_frame(opaque: *mut c_void, out: *mut Frame) -> c_int {
+    let shared = unsafe { &*opaque.cast::<Shared>() };
+    match shared.acquire() {
+        Ok(Some(frame)) => {
+            unsafe { out.write(frame) };
+            1
+        }
+        Ok(None) => 0,
+        Err(()) => -1,
+    }
 }
 unsafe extern "C" fn release(opaque: *mut c_void, target: *const Target, status: c_int) {
     let shared = unsafe { &*opaque.cast::<Shared>() };
-    let target = unsafe { *target };
-    {
-        let mut pool = shared.pool.lock();
-        let index = target.token as usize;
-        let slot = &mut pool.slots[index];
+    shared.release(unsafe { (*target).token }, status);
+}
+unsafe extern "C" fn release_frame(opaque: *mut c_void, frame: *const Frame, status: c_int) {
+    let shared = unsafe { &*opaque.cast::<Shared>() };
+    shared.release(unsafe { (*frame).target.token }, status);
+}
+unsafe extern "C" fn wakeup(opaque: *mut c_void) {
+    let shared = unsafe { &*opaque.cast::<Shared>() };
+    (shared.wake)();
+}
+impl Shared {
+    fn acquire(&self) -> Result<Option<Frame>, ()> {
+        let Some(mut pool) = self.pool.try_lock() else {
+            self.exhausted.store(true, Ordering::Release);
+            // The UI may have just released capacity before this contention.
+            // Always wake it to retry; there is no periodic timer to rescue us.
+            (self.wake)();
+            return Ok(None);
+        };
+        if pool.stopping {
+            return Ok(None);
+        }
+        let size = pool.size;
+        let Some(slot) = pool.slots.iter_mut().find(|slot| {
+            slot.lease.is_idle() && (slot.target.width as u32, slot.target.height as u32) == size
+        }) else {
+            self.exhausted.store(true, Ordering::Release);
+            return Ok(None);
+        };
+        let Some((wait_value, signal_value)) = slot.lease.acquire() else {
+            pool.error = Some("host timeline exhausted".into());
+            pool.stopping = true;
+            drop(pool);
+            (self.wake)();
+            return Err(());
+        };
+        Ok(Some(Frame {
+            target: slot.target,
+            semaphore: slot.semaphore,
+            wait_value,
+            signal_value,
+        }))
+    }
+
+    fn release(&self, token: u64, status: c_int) {
+        let mut pool = self.pool.lock();
+        let Some(slot) = pool.slots.get_mut(token as usize) else {
+            std::process::abort()
+        };
+        if !slot.lease.release(status == 0) {
+            std::process::abort();
+        }
         if status == 0 {
             slot.target.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-            pool.ready.push_back(index);
+            pool.ready.push_back(token as usize);
         } else {
+            // No producer signal is promised on error. Quarantine this session;
+            // never recycle the image or wait on a potentially unsignalled value.
             slot.target.layout = vk::ImageLayout::UNDEFINED;
-            slot.busy = false;
+            if !pool.stopping {
+                pool.error = Some(format!(
+                    "mpv discarded a GPU target ({status}); host session stopped"
+                ));
+            }
+            pool.stopping = true;
         }
+        drop(pool);
+        (self.wake)();
     }
-    (shared.wake)();
 }
 
 pub struct Host {
@@ -298,12 +399,13 @@ pub struct Host {
     _descriptor: Box<Descriptor>,
     _extensions: Vec<*const c_char>,
     shared: Arc<Shared>,
-    device: wgpu::Device,
+    completion: Completion,
+    context: Rc<DeviceContext>,
 }
 impl Host {
     pub fn new(
-        context: &DeviceContext,
-        options: &Options,
+        context: Rc<DeviceContext>,
+        options: &Settings,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         unsafe {
@@ -320,6 +422,8 @@ impl Host {
                 .get_physical_device_memory_properties(native.raw_physical_device());
             let shared = Arc::new(Shared {
                 raw: native.raw_device().clone(),
+                _device: context.device.clone(),
+                asynchronous: options.host_abi == HostAbi::V3,
                 family: native.queue_family_index(),
                 memory,
                 queue_lock: Arc::new(QueueLock::new()),
@@ -328,6 +432,7 @@ impl Host {
                     ready: VecDeque::new(),
                     stopping: false,
                     size: (options.width, options.height),
+                    error: None,
                 }),
                 exhausted: AtomicBool::new(false),
                 wake: Box::new(wake),
@@ -335,6 +440,16 @@ impl Host {
             for index in 0..3 {
                 let slot = shared.allocate(options.width, options.height, index)?;
                 shared.pool.lock().slots.push(slot);
+                if shared.asynchronous {
+                    let mut timeline = vk::SemaphoreTypeCreateInfo::default()
+                        .semaphore_type(vk::SemaphoreType::TIMELINE)
+                        .initial_value(0);
+                    let semaphore = shared.raw.create_semaphore(
+                        &vk::SemaphoreCreateInfo::default().push_next(&mut timeline),
+                        None,
+                    )?;
+                    shared.pool.lock().slots[index as usize].semaphore = semaphore;
+                }
             }
             let extensions: Vec<_> = native
                 .enabled_device_extensions()
@@ -342,7 +457,7 @@ impl Host {
                 .map(|e| e.as_ptr())
                 .collect();
             let descriptor = Box::new(Descriptor {
-                version: 1,
+                version: options.host_abi as u32,
                 instance: instance.raw_instance().handle(),
                 physical_device: native.raw_physical_device(),
                 device: shared.raw.handle(),
@@ -356,6 +471,9 @@ impl Host {
                 unlock_queue,
                 acquire,
                 release,
+                target_color: None,
+                acquire_frame: shared.asynchronous.then_some(acquire_frame),
+                release_frame: shared.asynchronous.then_some(release_frame),
             });
             // Do not retain a wgpu internal guard across libmpv initialization
             // or fallible teardown paths that poll the same device.
@@ -402,6 +520,38 @@ impl Host {
                 *library.get::<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>(
                     b"mpv_request_log_messages\0",
                 )?;
+            let set_wakeup = *library.get::<unsafe extern "C" fn(
+                *mut c_void,
+                Option<unsafe extern "C" fn(*mut c_void)>,
+                *mut c_void,
+            )>(b"mpv_set_wakeup_callback\0")?;
+            let completed = shared.clone();
+            let completion = Completion::new(context.device.clone(), move |token, result| {
+                let mut pool = completed.pool.lock();
+                match result {
+                    Ok(()) => {
+                        let slot = &mut pool.slots[token];
+                        if !slot.lease.complete() {
+                            std::process::abort();
+                        }
+                        slot.target.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+                    }
+                    Err(error) => {
+                        pool.error = Some(error);
+                        pool.stopping = true;
+                    }
+                }
+                let needs_ui = pool.error.is_some()
+                    || completed.exhausted.load(Ordering::Acquire)
+                    || pool.slots.iter().any(|slot| {
+                        slot.lease.is_idle()
+                            && (slot.target.width as u32, slot.target.height as u32) != pool.size
+                    });
+                drop(pool);
+                if needs_ui {
+                    (completed.wake)();
+                }
+            })?;
             let handle = create();
             if handle.is_null() {
                 return Err("mpv_create failed".into());
@@ -417,8 +567,14 @@ impl Host {
                 _descriptor: descriptor,
                 _extensions: extensions,
                 shared,
-                device: context.device.clone(),
+                completion,
+                context,
             };
+            set_wakeup(
+                handle,
+                Some(wakeup),
+                Arc::as_ptr(&host.shared).cast_mut().cast(),
+            );
             let option = |name: &str, value: &str| -> Result<(), Box<dyn std::error::Error>> {
                 let name = CString::new(name)?;
                 let value = CString::new(value)?;
@@ -479,6 +635,14 @@ impl Host {
         self.shared.queue_lock.clone()
     }
 
+    pub fn fail(&self, error: String) {
+        let mut pool = self.shared.pool.lock();
+        pool.error = Some(error);
+        pool.stopping = true;
+        drop(pool);
+        (self.shared.wake)();
+    }
+
     fn error(&self, status: c_int) -> String {
         // mpv_error_string returns static storage, never owned by the caller.
         unsafe { CStr::from_ptr((self.error_string)(status)) }
@@ -489,13 +653,10 @@ impl Host {
     /// Application-thread only, outside the queue lock and every VO callback.
     /// Success means queued; execution failures arrive through poll_events.
     pub fn execute(&self, command: Command) -> Result<(), String> {
-        let (args, id);
-        let number;
-        match command {
-            Command::TogglePause => {
-                args = [c"cycle", c"pause", c""];
-                id = 1;
-            }
+        let (args, id): (Vec<String>, u64) = match command {
+            Command::TogglePause => (vec!["cycle".into(), "pause".into()], 1),
+            Command::Stop => (vec!["stop".into()], 5),
+            Command::LoadFile(source) => (vec!["loadfile".into(), source], 6),
             Command::SeekAbsolute(value)
             | Command::SeekRelative(value)
             | Command::SetVolume(value) => {
@@ -507,29 +668,26 @@ impl Host {
                 {
                     return Err("mpv absolute position and volume must be nonnegative".into());
                 }
-                number = CString::new(value.to_string()).map_err(|error| error.to_string())?;
-                (args, id) = match command {
+                let value = value.to_string();
+                match command {
                     Command::SeekAbsolute(_) => {
-                        ([c"seek", number.as_c_str(), c"absolute+exact"], 2)
+                        (vec!["seek".into(), value, "absolute+exact".into()], 2)
                     }
                     Command::SeekRelative(_) => {
-                        ([c"seek", number.as_c_str(), c"relative+exact"], 3)
+                        (vec!["seek".into(), value, "relative+exact".into()], 3)
                     }
-                    Command::SetVolume(_) => ([c"set", c"volume", number.as_c_str()], 4),
-                    Command::TogglePause => unreachable!(),
-                };
+                    Command::SetVolume(_) => (vec!["set".into(), "volume".into(), value], 4),
+                    _ => unreachable!(),
+                }
             }
-        }
-        let pointers = [
-            args[0].as_ptr(),
-            args[1].as_ptr(),
-            if id == 1 {
-                std::ptr::null()
-            } else {
-                args[2].as_ptr()
-            },
-            std::ptr::null(),
-        ];
+        };
+        let args = args
+            .into_iter()
+            .map(CString::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut pointers: Vec<_> = args.iter().map(|arg| arg.as_ptr()).collect();
+        pointers.push(std::ptr::null());
         // mpv copies command arguments before returning.
         let status = unsafe { (self.command_async)(self.handle, id, pointers.as_ptr()) };
         if status < 0 {
@@ -543,6 +701,10 @@ impl Host {
     /// All payloads are copied before the next wait_event invalidates them.
     pub fn poll_events(&self) -> Vec<PlayerEvent> {
         let mut events = Vec::new();
+        if let Some(error) = self.shared.pool.lock().error.take() {
+            events.push(PlayerEvent::Error(error));
+            events.push(PlayerEvent::Shutdown);
+        }
         // Yield to the application during bursts, scheduling another turn even
         // if every event in this batch was an ignored future event type.
         for _ in 0..256 {
@@ -564,6 +726,8 @@ impl Host {
                         2 => "absolute seek",
                         3 => "relative seek",
                         4 => "set volume",
+                        5 => "stop",
+                        6 => "loadfile",
                         _ => "command",
                     };
                     events.push(PlayerEvent::Error(format!(
@@ -630,7 +794,8 @@ impl Host {
             let pool = self.shared.pool.lock();
             !pool.stopping
                 && pool.slots.iter().any(|slot| {
-                    !slot.busy && (slot.target.width as u32, slot.target.height as u32) == pool.size
+                    slot.lease.is_idle()
+                        && (slot.target.width as u32, slot.target.height as u32) == pool.size
                 })
                 && self.shared.exhausted.swap(false, Ordering::AcqRel)
         };
@@ -665,24 +830,39 @@ impl Host {
         for index in 0..3 {
             let size = {
                 let mut pool = self.shared.pool.lock();
+                if pool.stopping {
+                    return Ok(());
+                }
                 let size = pool.size;
                 let slot = &mut pool.slots[index];
-                if slot.busy || (slot.target.width as u32, slot.target.height as u32) == size {
+                if !slot.lease.is_idle()
+                    || (slot.target.width as u32, slot.target.height as u32) == size
+                {
                     continue;
                 }
                 // Reserve only GPU-idle slots. Allocation never holds the pool
                 // lock, so VO callbacks cannot block behind a Vulkan allocation.
-                slot.busy = true;
+                slot.lease.reserve();
                 size
             };
             let replacement = match self.shared.allocate(size.0, size.1, index as u64) {
                 Ok(slot) => slot,
                 Err(error) => {
-                    self.shared.pool.lock().slots[index].busy = false;
+                    self.shared.pool.lock().slots[index]
+                        .lease
+                        .cancel_reservation();
                     return Err(error);
                 }
             };
-            let old = std::mem::replace(&mut self.shared.pool.lock().slots[index], replacement);
+            let old = {
+                let mut pool = self.shared.pool.lock();
+                let slot = &mut pool.slots[index];
+                let mut replacement = replacement;
+                replacement.semaphore = slot.semaphore;
+                slot.lease.cancel_reservation();
+                replacement.lease = slot.lease;
+                std::mem::replace(slot, replacement)
+            };
             unsafe {
                 self.shared.raw.destroy_image(old.target.image, None);
                 self.shared.raw.free_memory(old.memory, None);
@@ -737,29 +917,36 @@ impl Host {
         texture
     }
 
-    // Caller holds the shared queue lock. No mpv API is called here. Ready means
-    // flip_page has authorized display AND producer GPU writes have completed.
+    // Only successful scheduled releases enter this path. The v3 wait gates
+    // the source transition and copy, independently of the CPU release callback.
     pub fn copy_ready(&self, queue: &wgpu::Queue, destination: &mut wgpu::Texture) -> Option<bool> {
-        let target = {
+        let (target, semaphore, signal_value) = {
             let mut pool = self.shared.pool.lock();
+            if pool.stopping {
+                return None;
+            }
             let index = pool.ready.pop_front()?;
-            pool.slots[index].target
+            let slot = &mut pool.slots[index];
+            let signal = slot.lease.copy().expect("released target");
+            (slot.target, slot.semaphore, signal)
         };
         let resized = destination.width() != target.width as u32
             || destination.height() != target.height as u32;
         if resized {
+            let _guard = self.shared.queue_lock.lock();
             *destination = Self::private_texture(
-                &self.device,
+                &self.context.device,
                 queue,
                 target.width as u32,
                 target.height as u32,
             );
         }
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("scheduled SDR copy"),
-            });
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("scheduled SDR copy"),
+                });
         encoder.transition_resources(
             std::iter::empty(),
             std::iter::once(wgpu::TextureTransition {
@@ -769,13 +956,14 @@ impl Host {
             }),
         );
         let before = encoder.finish();
-        // wgpu 29 forbids mixing its encoder API with raw HAL recording.
+        // wgpu forbids mixing its encoder API with raw HAL recording.
         // Keep tracked transitions in separate command buffers around the copy.
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("raw SDR image copy"),
-            });
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("raw SDR image copy"),
+                });
         unsafe {
             let dest = destination
                 .as_hal::<wgpu::hal::api::Vulkan>()
@@ -827,11 +1015,12 @@ impl Host {
             });
         }
         let copy = encoder.finish();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("sample copied SDR image"),
-            });
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("sample copied SDR image"),
+                });
         encoder.transition_resources(
             std::iter::empty(),
             std::iter::once(wgpu::TextureTransition {
@@ -840,17 +1029,23 @@ impl Host {
                 state: wgpu::TextureUses::RESOURCE,
             }),
         );
-        queue.submit([before, copy, encoder.finish()]);
-        let shared = self.shared.clone();
-        queue.on_submitted_work_done(move || {
-            {
-                let mut pool = shared.pool.lock();
-                let slot = &mut pool.slots[target.token as usize];
-                slot.target.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
-                slot.busy = false;
-            }
-            (shared.wake)();
-        });
+        let after = encoder.finish();
+        let _guard = self.shared.queue_lock.lock();
+        let _sync = if self.shared.asynchronous {
+            let native = unsafe { queue.as_hal::<wgpu::hal::api::Vulkan>() }.expect("Vulkan queue");
+            native.add_wait_semaphore(
+                semaphore,
+                Some(signal_value),
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+            );
+            native.add_signal_semaphore(semaphore, Some(signal_value + 1));
+            Some(SubmissionSync { queue, semaphore })
+        } else {
+            None
+        };
+        // Keep the one-shot wait/signal and submission in the same queue gate.
+        let submission = queue.submit([before, copy, after]);
+        self.completion.track(submission, target.token as usize);
         Some(resized)
     }
 }
@@ -859,7 +1054,10 @@ impl Drop for Host {
         self.shared.pool.lock().stopping = true;
         // Never hold queue/pool locks across mpv teardown: it joins the VO thread.
         unsafe { (self.terminate)(self.handle) };
-        let _guard = self.shared.queue_lock.lock();
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.completion.shutdown();
+        let _ = self
+            .context
+            .device
+            .poll(wgpu::PollType::wait_indefinitely());
     }
 }
