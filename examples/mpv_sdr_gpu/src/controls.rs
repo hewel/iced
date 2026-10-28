@@ -1,9 +1,10 @@
+use crate::timeline::{Action, Timeline};
 use iced_wgpu::Renderer;
 use iced_widget::{
     Widget, bottom, button, checkbox, column, container, row, scrollable, slider, text,
 };
 use iced_winit::core::{Font, Pixels, Theme};
-use mpv_sdr_gpu::{Command, PlayerEvent};
+use mpv_sdr_gpu::{Command, PlayerEvent, preview};
 
 pub struct Controls {
     show_details: bool,
@@ -17,6 +18,11 @@ pub struct Controls {
     seekable: Option<bool>,
     file_state: FileState,
     seek_preview: Option<f64>,
+    pending_seek: Option<f64>,
+    seek_request: u64,
+    media_revision: u64,
+    thumbnail_target: Option<f64>,
+    thumbnail: Option<Result<preview::Frame, String>>,
     error: Option<String>,
     presentations: u64,
     copies: u64,
@@ -35,8 +41,7 @@ enum FileState {
 pub enum Message {
     ShowDetails(bool),
     TogglePause,
-    PreviewSeek(f64),
-    CommitSeek,
+    Timeline(Action),
     SeekRelative(f64),
     SetVolume(f64),
     DismissError,
@@ -56,6 +61,11 @@ impl Controls {
             seekable: None,
             file_state: FileState::Loading,
             seek_preview: None,
+            pending_seek: None,
+            seek_request: 0,
+            media_revision: 0,
+            thumbnail_target: None,
+            thumbnail: None,
             error: None,
             presentations: 0,
             copies: 0,
@@ -69,19 +79,26 @@ impl Controls {
             Message::TogglePause if self.active() && self.pause.is_some() => {
                 return Some(Command::TogglePause);
             }
-            Message::PreviewSeek(position) if self.can_seek_absolute() && position.is_finite() => {
-                self.seek_preview = self.duration.map(|duration| position.clamp(0.0, duration));
+            Message::Timeline(Action::Preview(position))
+                if self.can_seek_absolute() && position.is_finite() =>
+            {
+                self.seek_preview = Some(position.clamp(0.0, self.duration.unwrap()));
             }
-            Message::CommitSeek => {
-                let preview = self.seek_preview.take();
-                if self.can_seek_absolute() {
-                    return preview.zip(self.duration).map(|(position, duration)| {
-                        Command::SeekAbsolute(position.clamp(0.0, duration))
-                    });
-                }
+            Message::Timeline(Action::Commit(position))
+                if self.can_seek_absolute() && position.is_finite() =>
+            {
+                self.seek_preview = None;
+                let target = position.clamp(0.0, self.duration.unwrap());
+                return Some(self.commit_seek(target));
             }
+            Message::Timeline(Action::Cancel) => self.seek_preview = None,
             Message::SeekRelative(offset) if self.can_seek() && offset.is_finite() => {
                 self.seek_preview = None;
+                if self.can_seek_absolute() {
+                    let target = (self.pending_seek.or(self.time_pos).unwrap() + offset)
+                        .clamp(0.0, self.duration.unwrap());
+                    return Some(self.commit_seek(target));
+                }
                 return Some(Command::SeekRelative(offset));
             }
             Message::SetVolume(volume)
@@ -105,6 +122,8 @@ impl Controls {
             }
             PlayerEvent::Duration(value) => {
                 self.duration = value.filter(|value| value.is_finite() && *value >= 0.0);
+                self.seek_preview = self.seek_preview.zip(self.duration).map(|(p, d)| p.min(d));
+                self.pending_seek = self.pending_seek.zip(self.duration).map(|(p, d)| p.min(d));
             }
             PlayerEvent::Pause(value) => self.pause = value,
             PlayerEvent::Volume(value) => {
@@ -117,10 +136,24 @@ impl Controls {
             PlayerEvent::StartFile => {
                 self.file_state = FileState::Loading;
                 self.seek_preview = None;
+                self.media_revision = self
+                    .media_revision
+                    .checked_add(1)
+                    .expect("media revision exhausted");
                 // Unchanged properties need not be re-emitted across files.
                 // Keep observer values, but hide file-local data until loaded.
             }
             PlayerEvent::FileLoaded => self.file_state = FileState::Ready,
+            PlayerEvent::PlaybackRestart | PlayerEvent::MediaPath(_) => {}
+            PlayerEvent::SeekFinished { request, result } => {
+                if self.pending_seek.is_some() && request == self.seek_request {
+                    self.pending_seek = None;
+                    match result {
+                        Ok(position) => self.time_pos = Some(position),
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            }
             PlayerEvent::EndFile { error } => {
                 self.file_state = FileState::Ended;
                 self.seek_preview = None;
@@ -128,7 +161,7 @@ impl Controls {
                     self.report_error(error);
                 }
             }
-            PlayerEvent::Error(error) => self.report_error(error),
+            PlayerEvent::Error(error) => self.error = Some(error),
             PlayerEvent::Shutdown => {
                 self.file_state = FileState::Shutdown;
                 self.seek_preview = None;
@@ -136,10 +169,42 @@ impl Controls {
         }
         if !self.can_seek_absolute() {
             self.seek_preview = None;
+            self.pending_seek = None;
+            self.preview_target(None);
+        }
+    }
+
+    pub fn preview_target(&mut self, target: Option<f64>) {
+        if self.thumbnail_target != target {
+            self.thumbnail_target = target;
+            self.thumbnail = None;
+        }
+    }
+
+    pub fn preview_outcome(&mut self, outcome: preview::Outcome) {
+        if self.thumbnail_target == Some(outcome.requested) {
+            self.thumbnail = Some(outcome.result);
+        }
+    }
+
+    pub fn preview_enabled(&self) -> bool {
+        self.can_seek_absolute()
+    }
+
+    fn commit_seek(&mut self, position: f64) -> Command {
+        self.seek_request = self
+            .seek_request
+            .checked_add(1)
+            .expect("seek request IDs exhausted");
+        self.pending_seek = Some(position);
+        Command::SeekAbsolute {
+            request: self.seek_request,
+            position,
         }
     }
 
     pub fn report_error(&mut self, error: String) {
+        self.pending_seek = None;
         self.error = Some(error);
     }
 
@@ -216,17 +281,50 @@ impl Controls {
         ]
         .spacing(6);
 
+        if let Some(target) = self.thumbnail_target {
+            let surface = match &self.thumbnail {
+                Some(Ok(frame)) => iced_widget::image(&frame.image)
+                    .width(preview::WIDTH)
+                    .height(preview::HEIGHT)
+                    .boxed(),
+                Some(Err(error)) => container(text(error).size(14))
+                    .padding(12)
+                    .width(preview::WIDTH)
+                    .height(preview::HEIGHT)
+                    .boxed(),
+                None => container(text("Loading preview…").size(14))
+                    .padding(12)
+                    .width(preview::WIDTH)
+                    .height(preview::HEIGHT)
+                    .boxed(),
+            };
+            let caption = match &self.thumbnail {
+                Some(Ok(frame)) => format!(
+                    "Target {target:.1} s · frame {:.2} s · {}",
+                    frame.actual, frame.color
+                ),
+                _ => format!("Preview target {target:.1} s"),
+            };
+            content = content.push(column![surface, text(caption).size(14)].spacing(4).boxed());
+        } else {
+            // Preserve the timeline's child index across thumbnail visibility
+            // changes, otherwise a preview would destroy its active drag state.
+            content = content.push(iced_widget::space::vertical().height(0).boxed());
+        }
         if self.can_seek_absolute() {
             let duration = self.duration.unwrap_or(0.0);
             content = content.push(
-                slider(
-                    0.0..=duration,
-                    self.seek_preview.or(self.time_pos).unwrap_or(0.0),
-                    Message::PreviewSeek,
+                Widget::<Action, Theme, Renderer>::map(
+                    Timeline::new(
+                        self.seek_preview
+                            .or(self.pending_seek)
+                            .or(self.time_pos)
+                            .unwrap_or(0.0),
+                        duration,
+                    )
+                    .generation(self.media_revision),
+                    Message::Timeline,
                 )
-                .step(0.1)
-                .height(40)
-                .on_release(Message::CommitSeek)
                 .boxed(),
             );
         } else {
@@ -238,21 +336,21 @@ impl Controls {
                 .boxed(),
             );
         }
-        if let Some(preview) = self.seek_preview {
-            content = content.push(
-                row![
-                    text(format!(
-                        "Seek preview: {} · release slider or choose Seek",
-                        time_label(Some(preview))
-                    ))
-                    .size(14),
-                    button("Seek").height(40).on_press(Message::CommitSeek),
-                ]
-                .spacing(10)
-                .wrap()
-                .boxed(),
-            );
-        }
+        content = content.push(
+            text(if let Some(preview) = self.seek_preview {
+                format!(
+                    "Seek to {} · release inside to seek · Esc to cancel",
+                    time_label(Some(preview))
+                )
+            } else if let Some(target) = self.pending_seek {
+                format!("Seeking to {}", time_label(Some(target)))
+            } else {
+                "Drag to seek · arrows: 5 s · Shift+arrows: 1 s · Home / End".to_owned()
+            })
+            .size(14)
+            .font(Font::MONOSPACE)
+            .boxed(),
+        );
 
         let volume_label = self.volume.map_or_else(
             || "unavailable".to_owned(),
@@ -361,4 +459,88 @@ fn time_label(value: Option<f64>) -> String {
         || "unavailable".to_owned(),
         |seconds| format!("{seconds:.1} s"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready() -> Controls {
+        let mut controls = Controls::new();
+        for event in [
+            PlayerEvent::Duration(Some(120.0)),
+            PlayerEvent::TimePos(Some(10.0)),
+            PlayerEvent::Seekable(Some(true)),
+            PlayerEvent::Idle(Some(false)),
+            PlayerEvent::FileLoaded,
+        ] {
+            controls.observe(event);
+        }
+        controls
+    }
+
+    #[test]
+    fn stale_restart_and_position_do_not_acknowledge_new_seek() {
+        let mut controls = ready();
+        controls.update(Message::Timeline(Action::Commit(30.0)));
+        controls.update(Message::Timeline(Action::Commit(50.0)));
+        controls.observe(PlayerEvent::PlaybackRestart);
+        controls.observe(PlayerEvent::TimePos(Some(30.0)));
+        assert_eq!(controls.pending_seek, Some(50.0));
+        controls.observe(PlayerEvent::SeekFinished {
+            request: 1,
+            result: Ok(30.0),
+        });
+        assert_eq!(controls.pending_seek, Some(50.0));
+        controls.observe(PlayerEvent::SeekFinished {
+            request: 2,
+            result: Ok(51.0),
+        });
+        assert_eq!(controls.pending_seek, None);
+        assert_eq!(controls.time_pos, Some(51.0));
+        controls.update(Message::Timeline(Action::Commit(51.0)));
+        controls.observe(PlayerEvent::SeekFinished {
+            request: 3,
+            result: Ok(51.0),
+        });
+        assert_eq!(controls.pending_seek, None);
+    }
+
+    #[test]
+    fn cancel_does_not_seek_and_file_change_invalidates_targets() {
+        let mut controls = ready();
+        assert!(
+            controls
+                .update(Message::Timeline(Action::Preview(60.0)))
+                .is_none()
+        );
+        assert!(controls.update(Message::Timeline(Action::Cancel)).is_none());
+        assert_eq!(controls.seek_preview, None);
+        assert_eq!(controls.time_pos, Some(10.0));
+        controls.update(Message::Timeline(Action::Commit(50.0)));
+        controls.observe(PlayerEvent::StartFile);
+        assert_eq!(controls.pending_seek, None);
+        assert!(
+            controls
+                .update(Message::Timeline(Action::Commit(60.0)))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn repeated_relative_actions_accumulate_on_latest_target() {
+        let mut controls = ready();
+        controls.update(Message::SeekRelative(10.0));
+        assert!(matches!(
+            controls.update(Message::SeekRelative(10.0)),
+            Some(Command::SeekAbsolute { position: 30.0, .. })
+        ));
+        assert_eq!(controls.pending_seek, Some(30.0));
+        assert!(
+            controls
+                .update(Message::Timeline(Action::Commit(f64::NAN)))
+                .is_none()
+        );
+        assert_eq!(controls.pending_seek, Some(30.0));
+    }
 }

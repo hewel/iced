@@ -1,3 +1,4 @@
+use crate::deadline::{NATIVE_OPERATION_TIMEOUT, WakeTimer};
 use crate::{HostAbi, Settings, completion::Completion, gpu::DeviceContext, pool::Lease};
 use ash::vk;
 use iced_wgpu::wgpu;
@@ -10,12 +11,20 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 #[derive(Debug, Clone)]
 pub enum Command {
     TogglePause,
-    SeekAbsolute(f64),
+    /// Request IDs belong to the caller and must not be reused while pending.
+    /// Seeks are serialized; only the latest queued target is retained.
+    /// Superseded queued requests do not emit SeekFinished. File transitions
+    /// discard all pending requests. Do not race these with external IPC seeks.
+    SeekAbsolute {
+        request: u64,
+        position: f64,
+    },
     SeekRelative(f64),
     SetVolume(f64),
     Stop,
@@ -34,7 +43,18 @@ pub enum PlayerEvent {
     Seekable(Option<bool>),
     StartFile,
     FileLoaded,
-    EndFile { error: Option<String> },
+    /// Loaded source snapshot; emitted even when the same path is reloaded.
+    MediaPath(Option<String>),
+    PlaybackRestart,
+    /// Snapshot after this request's acknowledged seek/restart, not a proximity
+    /// test against the target. Sparse media may land beyond the requested time.
+    SeekFinished {
+        request: u64,
+        result: Result<f64, String>,
+    },
+    EndFile {
+        error: Option<String>,
+    },
     Error(String),
     Shutdown,
 }
@@ -46,11 +66,14 @@ const MPV_FORMAT_DOUBLE: c_int = 5;
 const MPV_EVENT_NONE: c_int = 0;
 const MPV_EVENT_SHUTDOWN: c_int = 1;
 const MPV_EVENT_LOG_MESSAGE: c_int = 2;
+const MPV_EVENT_GET_PROPERTY_REPLY: c_int = 3;
 const MPV_EVENT_COMMAND_REPLY: c_int = 5;
 const MPV_EVENT_START_FILE: c_int = 6;
 const MPV_EVENT_END_FILE: c_int = 7;
 const MPV_EVENT_FILE_LOADED: c_int = 8;
 const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
+const MPV_EVENT_SEEK: c_int = 20;
+const MPV_EVENT_PLAYBACK_RESTART: c_int = 21;
 const MPV_EVENT_QUEUE_OVERFLOW: c_int = 24;
 const MPV_END_FILE_REASON_ERROR: c_int = 4;
 const MPV_LOG_LEVEL_ERROR: c_int = 20;
@@ -388,12 +411,72 @@ impl Shared {
     }
 }
 
+struct PendingSeek {
+    request: u64,
+    native_id: u64,
+    acknowledged: bool,
+    started: bool,
+    snapshot: bool,
+    position: f64,
+    checking_capability: bool,
+    submission_pending: bool,
+    deadline: Instant,
+}
+
+fn observe_seek_boundary(
+    event_id: c_int,
+    pending: &mut Option<PendingSeek>,
+    queued: &mut Option<(u64, f64)>,
+) {
+    if matches!(event_id, MPV_EVENT_END_FILE | MPV_EVENT_START_FILE) {
+        invalidate_seeks(pending, queued);
+    }
+}
+
+fn invalidate_seeks(pending: &mut Option<PendingSeek>, queued: &mut Option<(u64, f64)>) {
+    *pending = None;
+    *queued = None;
+}
+
+fn take_seek_submission(pending: &mut Option<PendingSeek>) -> Option<(u64, u64, f64)> {
+    let seek = pending.as_mut().filter(|seek| seek.submission_pending)?;
+    seek.submission_pending = false;
+    Some((seek.request, seek.native_id, seek.position))
+}
+
+const SEEK_TIMEOUT_ERROR: &str =
+    "seek completion timed out; seeking disabled until media reload (native seek may still finish)";
+
+fn expire_seek(
+    pending: &mut Option<PendingSeek>,
+    queued: &mut Option<(u64, f64)>,
+    failed: &mut bool,
+    now: Instant,
+    events: &mut Vec<PlayerEvent>,
+) {
+    if pending.as_ref().is_some_and(|seek| now >= seek.deadline) {
+        *failed = true;
+        let request = pending.take().expect("expired seek").request;
+        events.push(PlayerEvent::SeekFinished {
+            request,
+            result: Err(SEEK_TIMEOUT_ERROR.into()),
+        });
+        if let Some((request, _)) = queued.take() {
+            events.push(PlayerEvent::SeekFinished {
+                request,
+                result: Err(SEEK_TIMEOUT_ERROR.into()),
+            });
+        }
+    }
+}
+
 pub struct Host {
     handle: *mut c_void,
     terminate: unsafe extern "C" fn(*mut c_void),
     request_redraw: unsafe extern "C" fn(*mut c_void) -> c_int,
     command_async: unsafe extern "C" fn(*mut c_void, u64, *const *const c_char) -> c_int,
     wait_event: unsafe extern "C" fn(*mut c_void, f64) -> *mut MpvEvent,
+    get_property_async: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
     error_string: unsafe extern "C" fn(c_int) -> *const c_char,
     _library: libloading::Library,
     _descriptor: Box<Descriptor>,
@@ -401,6 +484,12 @@ pub struct Host {
     shared: Arc<Shared>,
     completion: Completion,
     context: Rc<DeviceContext>,
+    queued_seek: Option<(u64, f64)>,
+    seek: Option<PendingSeek>,
+    next_seek_id: u64,
+    media_id: u64,
+    seek_failed: bool,
+    seek_timer: WakeTimer,
 }
 impl Host {
     pub fn new(
@@ -510,6 +599,11 @@ impl Host {
                     .get::<unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int>(
                         b"mpv_observe_property\0",
                     )?;
+            let get_property_async =
+                *library
+                    .get::<unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int>(
+                        b"mpv_get_property_async\0",
+                    )?;
             let wait_event = *library
                 .get::<unsafe extern "C" fn(*mut c_void, f64) -> *mut MpvEvent>(
                     b"mpv_wait_event\0",
@@ -552,6 +646,8 @@ impl Host {
                     (completed.wake)();
                 }
             })?;
+            let timer_shared = shared.clone();
+            let seek_timer = WakeTimer::new(move || (timer_shared.wake)())?;
             let handle = create();
             if handle.is_null() {
                 return Err("mpv_create failed".into());
@@ -562,6 +658,7 @@ impl Host {
                 request_redraw,
                 command_async,
                 wait_event,
+                get_property_async,
                 error_string,
                 _library: library,
                 _descriptor: descriptor,
@@ -569,6 +666,12 @@ impl Host {
                 shared,
                 completion,
                 context,
+                queued_seek: None,
+                seek: None,
+                next_seek_id: 1 << 63,
+                media_id: 10,
+                seek_failed: false,
+                seek_timer,
             };
             set_wakeup(
                 handle,
@@ -652,27 +755,38 @@ impl Host {
 
     /// Application-thread only, outside the queue lock and every VO callback.
     /// Success means queued; execution failures arrive through poll_events.
-    pub fn execute(&self, command: Command) -> Result<(), String> {
+    pub fn execute(&mut self, command: Command) -> Result<(), String> {
+        if matches!(command, Command::LoadFile(_) | Command::Stop) {
+            // Invalidate at admission, not only when native lifecycle events
+            // arrive: an old capability reply may already be queued.
+            invalidate_seeks(&mut self.seek, &mut self.queued_seek);
+            self.seek_timer.arm(None);
+        }
+        if let Command::SeekAbsolute { request, position } = command {
+            if self.seek_failed {
+                return Err(SEEK_TIMEOUT_ERROR.into());
+            }
+            if !position.is_finite() || position < 0.0 {
+                return Err("seek position must be finite and nonnegative".into());
+            }
+            self.queued_seek = Some((request, position));
+            (self.shared.wake)();
+            return Ok(());
+        }
         let (args, id): (Vec<String>, u64) = match command {
             Command::TogglePause => (vec!["cycle".into(), "pause".into()], 1),
             Command::Stop => (vec!["stop".into()], 5),
             Command::LoadFile(source) => (vec!["loadfile".into(), source], 6),
-            Command::SeekAbsolute(value)
-            | Command::SeekRelative(value)
-            | Command::SetVolume(value) => {
+            Command::SeekAbsolute { .. } => unreachable!(),
+            Command::SeekRelative(value) | Command::SetVolume(value) => {
                 if !value.is_finite() {
                     return Err("mpv command requires a finite value".into());
                 }
-                if matches!(command, Command::SeekAbsolute(_) | Command::SetVolume(_))
-                    && value < 0.0
-                {
+                if matches!(command, Command::SetVolume(_)) && value < 0.0 {
                     return Err("mpv absolute position and volume must be nonnegative".into());
                 }
                 let value = value.to_string();
                 match command {
-                    Command::SeekAbsolute(_) => {
-                        (vec!["seek".into(), value, "absolute+exact".into()], 2)
-                    }
                     Command::SeekRelative(_) => {
                         (vec!["seek".into(), value, "relative+exact".into()], 3)
                     }
@@ -697,24 +811,246 @@ impl Host {
         }
     }
 
+    fn begin_seek(&mut self, request: u64, position: f64) -> Result<(), String> {
+        let native_id = self.next_seek_id;
+        self.next_seek_id = native_id.checked_add(1).ok_or("seek ID exhausted")?;
+        let status = unsafe {
+            (self.get_property_async)(
+                self.handle,
+                native_id,
+                c"seekable".as_ptr(),
+                MPV_FORMAT_FLAG,
+            )
+        };
+        if status < 0 {
+            return Err(self.error(status));
+        }
+        self.seek = Some(PendingSeek {
+            request,
+            native_id,
+            acknowledged: false,
+            started: false,
+            snapshot: false,
+            position,
+            checking_capability: true,
+            submission_pending: false,
+            deadline: Instant::now() + NATIVE_OPERATION_TIMEOUT,
+        });
+        self.seek_timer
+            .arm(self.seek.as_ref().map(|seek| seek.deadline));
+        Ok(())
+    }
+
+    fn submit_seek(&self, native_id: u64, position: f64) -> Result<(), String> {
+        let position = CString::new(position.to_string()).expect("finite number");
+        let args = [
+            c"seek".as_ptr(),
+            position.as_ptr(),
+            c"absolute+exact".as_ptr(),
+            std::ptr::null(),
+        ];
+        let status = unsafe { (self.command_async)(self.handle, native_id, args.as_ptr()) };
+        if status < 0 {
+            Err(self.error(status))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Application-thread only, outside the queue lock and every VO callback.
     /// All payloads are copied before the next wait_event invalidates them.
-    pub fn poll_events(&self) -> Vec<PlayerEvent> {
+    pub fn poll_events(&mut self) -> Vec<PlayerEvent> {
         let mut events = Vec::new();
         if let Some(error) = self.shared.pool.lock().error.take() {
             events.push(PlayerEvent::Error(error));
             events.push(PlayerEvent::Shutdown);
         }
+        // A successful command reply is only queue acceptance. If no restart
+        // follows, fail closed for this media: late untagged SEEK/restart events
+        // cannot safely be attributed to another submission.
+        expire_seek(
+            &mut self.seek,
+            &mut self.queued_seek,
+            &mut self.seek_failed,
+            Instant::now(),
+            &mut events,
+        );
         // Yield to the application during bursts, scheduling another turn even
         // if every event in this batch was an ignored future event type.
         for _ in 0..256 {
             let event = unsafe { &*(self.wait_event)(self.handle, 0.0) };
+            observe_seek_boundary(event.event_id, &mut self.seek, &mut self.queued_seek);
             match event.event_id {
-                MPV_EVENT_NONE => return events,
+                MPV_EVENT_NONE => {
+                    // Only submit after all already-queued lifecycle events
+                    // have had a chance to invalidate the capability result.
+                    if let Some((request, native_id, position)) =
+                        take_seek_submission(&mut self.seek)
+                        && let Err(error) = self.submit_seek(native_id, position)
+                    {
+                        self.seek = None;
+                        events.push(PlayerEvent::SeekFinished {
+                            request,
+                            result: Err(error),
+                        });
+                    }
+                    if self.seek.is_none()
+                        && let Some((request, position)) = self.queued_seek.take()
+                        && let Err(error) = self.begin_seek(request, position)
+                    {
+                        events.push(PlayerEvent::SeekFinished {
+                            request,
+                            result: Err(error),
+                        });
+                    }
+                    self.seek_timer
+                        .arm(self.seek.as_ref().map(|seek| seek.deadline));
+                    return events;
+                }
                 MPV_EVENT_SHUTDOWN => events.push(PlayerEvent::Shutdown),
-                MPV_EVENT_START_FILE => events.push(PlayerEvent::StartFile),
-                MPV_EVENT_FILE_LOADED => events.push(PlayerEvent::FileLoaded),
+                MPV_EVENT_START_FILE => {
+                    self.seek_failed = false;
+                    self.media_id = self.media_id.checked_add(1).expect("media IDs exhausted");
+                    events.push(PlayerEvent::StartFile);
+                }
+                MPV_EVENT_FILE_LOADED => {
+                    events.push(PlayerEvent::FileLoaded);
+                    let status = unsafe {
+                        (self.get_property_async)(self.handle, self.media_id, c"path".as_ptr(), 1)
+                    };
+                    if status < 0 {
+                        events.push(PlayerEvent::MediaPath(None));
+                    }
+                }
+                MPV_EVENT_GET_PROPERTY_REPLY if event.reply_userdata == self.media_id => {
+                    let path = if event.error >= 0 && !event.data.is_null() {
+                        let property = unsafe { &*event.data.cast::<MpvEventProperty>() };
+                        if property.format == 1 && !property.data.is_null() {
+                            let pointer = unsafe { *property.data.cast::<*const c_char>() };
+                            if pointer.is_null() {
+                                None
+                            } else {
+                                Some(
+                                    unsafe { CStr::from_ptr(pointer) }
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                )
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    events.push(PlayerEvent::MediaPath(path));
+                }
+                MPV_EVENT_SEEK => {
+                    if let Some(seek) = &mut self.seek
+                        && seek.acknowledged
+                    {
+                        seek.started = true;
+                    }
+                }
+                MPV_EVENT_PLAYBACK_RESTART => {
+                    events.push(PlayerEvent::PlaybackRestart);
+                    if let Some(seek) = &mut self.seek
+                        && seek.started
+                        && !seek.snapshot
+                    {
+                        seek.snapshot = true;
+                        let status = unsafe {
+                            (self.get_property_async)(
+                                self.handle,
+                                seek.native_id,
+                                c"time-pos".as_ptr(),
+                                MPV_FORMAT_DOUBLE,
+                            )
+                        };
+                        if status < 0 {
+                            let request = seek.request;
+                            self.seek = None;
+                            events.push(PlayerEvent::SeekFinished {
+                                request,
+                                result: Err(self.error(status)),
+                            });
+                        }
+                    }
+                }
+                MPV_EVENT_GET_PROPERTY_REPLY
+                    if self.seek.as_ref().is_some_and(|seek| {
+                        seek.checking_capability && seek.native_id == event.reply_userdata
+                    }) =>
+                {
+                    let seek = self.seek.as_mut().expect("matched capability query");
+                    seek.checking_capability = false;
+                    let request = seek.request;
+                    let seekable = if event.error >= 0 && !event.data.is_null() {
+                        let property = unsafe { &*event.data.cast::<MpvEventProperty>() };
+                        property.format == MPV_FORMAT_FLAG
+                            && !property.data.is_null()
+                            && unsafe { *property.data.cast::<c_int>() } != 0
+                    } else {
+                        false
+                    };
+                    if seekable {
+                        seek.submission_pending = true;
+                    } else {
+                        let error =
+                            "source is not seekable or seek capability is unavailable".into();
+                        self.seek = None;
+                        events.push(PlayerEvent::SeekFinished {
+                            request,
+                            result: Err(error),
+                        });
+                    }
+                }
+                MPV_EVENT_GET_PROPERTY_REPLY
+                    if self.seek.as_ref().is_some_and(|seek| {
+                        seek.snapshot && seek.native_id == event.reply_userdata
+                    }) =>
+                {
+                    let seek = self.seek.take().expect("matched seek");
+                    let result = if event.error < 0 {
+                        Err(self.error(event.error))
+                    } else if event.data.is_null() {
+                        Err("seek completed without a position".into())
+                    } else {
+                        let property = unsafe { &*event.data.cast::<MpvEventProperty>() };
+                        if property.format == MPV_FORMAT_DOUBLE && !property.data.is_null() {
+                            let position = unsafe { *property.data.cast::<f64>() };
+                            if position.is_finite() {
+                                Ok(position)
+                            } else {
+                                Err("invalid seek position".into())
+                            }
+                        } else {
+                            Err("seek position unavailable".into())
+                        }
+                    };
+                    events.push(PlayerEvent::SeekFinished {
+                        request: seek.request,
+                        result,
+                    });
+                }
+                MPV_EVENT_COMMAND_REPLY
+                    if self
+                        .seek
+                        .as_ref()
+                        .is_some_and(|seek| seek.native_id == event.reply_userdata) =>
+                {
+                    if event.error < 0 {
+                        let seek = self.seek.take().expect("matched seek");
+                        events.push(PlayerEvent::SeekFinished {
+                            request: seek.request,
+                            result: Err(self.error(event.error)),
+                        });
+                    } else if let Some(seek) = &mut self.seek {
+                        seek.acknowledged = true;
+                    }
+                }
                 MPV_EVENT_END_FILE if !event.data.is_null() => {
+                    self.seek_failed = false;
+                    self.media_id = self.media_id.checked_add(1).expect("media IDs exhausted");
                     let end = unsafe { &*event.data.cast::<MpvEventEndFile>() };
                     let error =
                         (end.reason == MPV_END_FILE_REASON_ERROR).then(|| self.error(end.error));
@@ -1061,3 +1397,6 @@ impl Drop for Host {
             .poll(wgpu::PollType::wait_indefinitely());
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -6,9 +6,11 @@
 //! native callbacks are internal. Drop the player after the window runtime exits.
 mod completion;
 pub mod compositor;
+mod deadline;
 mod gpu;
 mod interop;
 mod pool;
+pub mod preview;
 mod video;
 
 use iced_wgpu::wgpu;
@@ -140,8 +142,8 @@ impl Player {
     }
 
     pub fn execute(&self, command: Command) -> Result<(), String> {
-        let session = self.session.borrow();
-        let session = session.as_ref().ok_or("player has no graphics session")?;
+        let mut session = self.session.borrow_mut();
+        let session = session.as_mut().ok_or("player has no graphics session")?;
         session.host.execute(command)
     }
 

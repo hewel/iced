@@ -10,9 +10,9 @@ iced = { path = "../..", default-features = false, features = ["wgpu", "advanced
 iced_winit.workspace = true
 iced_winit.features = ["x11", "wayland"]
 iced_wgpu.workspace = true
-iced_wgpu.features = ["web-colors"]
+iced_wgpu.features = ["web-colors", "image"]
 iced_widget.workspace = true
-iced_widget.features = ["wgpu"]
+iced_widget.features = ["wgpu", "image"]
 futures.workspace = true
 futures.features = ["executor"]
 ash = "0.38"
@@ -29,3 +29,7 @@ iced = { path = "../..", default-features = false, features = ["image"] }
 [[example]]
 name = "native_smoke"
 path = "tests/native_smoke.rs"
+
+[[example]]
+name = "preview_smoke"
+path = "tests/preview_smoke.rs"
