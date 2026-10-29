@@ -154,6 +154,7 @@ members = [
     "futures",
     "graphics",
     "highlighter",
+    "mpv_preview",
     "program",
     "renderer",
     "runtime",
@@ -187,6 +188,7 @@ iced_devtools = { version = "0.15.0-dev", path = "devtools" }
 iced_futures = { version = "0.15.0-dev", path = "futures" }
 iced_graphics = { version = "0.15.0-dev", path = "graphics" }
 iced_highlighter = { version = "0.15.0-dev", path = "highlighter" }
+iced_mpv_preview = { version = "0.15.0-dev", path = "mpv_preview" }
 iced_program = { version = "0.15.0-dev", path = "program" }
 iced_renderer = { version = "0.15.0-dev", path = "renderer" }
 iced_runtime = { version = "0.15.0-dev", path = "runtime" }

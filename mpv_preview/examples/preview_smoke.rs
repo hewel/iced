@@ -1,7 +1,7 @@
 //! Opt-in native libmpv thumbnail acceptance; no desktop or main player is needed.
 use futures::{FutureExt, StreamExt};
-use iced_winit::core::image;
-use mpv_sdr_gpu::preview::{HEIGHT, Outcome, Preview, WIDTH};
+use iced_core::image;
+use iced_mpv_preview::{HEIGHT, Outcome, Preview, WIDTH};
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -44,7 +44,7 @@ async fn result(
     }
 }
 
-fn pixels(frame: &mpv_sdr_gpu::preview::Frame) -> Result<&[u8], String> {
+fn pixels(frame: &iced_mpv_preview::Frame) -> Result<&[u8], String> {
     let image::Handle::Rgba {
         width,
         height,
@@ -83,9 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     std::fs::create_dir_all(&options.report)?;
     let (preview, mut events) = Preview::new(options.libmpv)?;
-    preview.set_media(Some(options.source.clone()));
+    preview.set_media(Some(&options.source));
     let (timer, timeout) = futures::channel::oneshot::channel();
-    std::thread::spawn(move || {
+    let _ = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
         let _ = timer.send(());
     });
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(format!("unexpected rejection: {error}"));
                 }
                 println!("PASS explicit unsupported source: {error}");
-                preview.request(7.0);
+                let _ = preview.request(7.0);
                 if result(&preview, &mut events, &mut deadline)
                     .await?
                     .result
@@ -156,20 +156,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let previous = last.unwrap();
         // Replacing A/B with C must not deliver an older result. The deterministic
         // late-publication case is also covered by the mailbox regression test.
-        preview.request(6.0);
-        preview.request(2.0);
-        preview.request(3.3);
+        let _ = preview.request(6.0);
+        let _ = preview.request(2.0);
+        let _ = preview.request(3.3);
         let cached = result(&preview, &mut events, &mut deadline).await?.result?;
         if cached.requested != 3.3 || cached.image.id() != previous.image.id() {
             return Err("latest-target cache identity lost".into());
         }
-        preview.request(6.0);
+        let _ = preview.request(6.0);
         preview.cancel();
         if preview.take().is_some() {
             return Err("canceled result was delivered".into());
         }
-        preview.set_media(Some(options.source.clone()));
-        preview.request(3.3);
+        preview.set_media(Some(&options.source));
+        let _ = preview.request(3.3);
         let reloaded = result(&preview, &mut events, &mut deadline).await?.result?;
         if reloaded.requested != 3.3
             || reloaded.image.id() == previous.image.id()
@@ -178,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("reload reused old-generation pixels or decoded the wrong frame".into());
         }
         if let Some(duration) = options.duration {
-            preview.request(0.0);
+            let _ = preview.request(0.0);
             let first = result(&preview, &mut events, &mut deadline).await?.result?;
             let requested = preview.request(duration).ok_or("no preview source")?;
             let end = result(&preview, &mut events, &mut deadline).await?.result?;
@@ -193,20 +193,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     first.actual, end.actual
                 ));
             }
-            pixels(&first)?;
-            pixels(&end)?;
+            let _ = pixels(&first)?;
+            let _ = pixels(&end)?;
             println!(
                 "PASS boundary frames: request=0 actual={:.6}; request={requested:.3} actual={:.6}",
                 first.actual, end.actual
             );
         }
-        preview.request(6.0);
+        let _ = preview.request(6.0);
         preview.set_media(None);
         if preview.take().is_some() {
             return Err("unloaded media delivered a result".into());
         }
-        preview.set_media(Some(options.source.clone()));
-        preview.request(1.0);
+        preview.set_media(Some(&options.source));
+        let _ = preview.request(1.0);
         Ok::<(), String>(())
     })?;
     drop(preview);

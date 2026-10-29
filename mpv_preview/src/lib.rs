@@ -1,8 +1,12 @@
-//! Independent CPU thumbnails with explicit SDR/HDR to sRGB conversion.
+//! Independent, bounded CPU thumbnails for resolved local and HTTP(S) sources.
+//!
+//! Source URLs are opaque capabilities: pass them verbatim and never log them.
+//! Times use mpv's default rebased timeline, not raw transport timestamps.
+//! Keep the owner outside the UI runtime: its destructor joins native teardown.
 mod color;
 mod software;
 
-use iced_winit::core::image;
+use iced_core::image;
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -11,22 +15,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Output width in pixels.
 pub const WIDTH: u32 = 320;
+/// Output height in pixels.
 pub const HEIGHT: u32 = 180;
+/// Maximum retained decoded frames per source generation.
 pub const CACHE_FRAMES: usize = 8;
 const SEEK_INTERVAL: Duration = Duration::from_millis(100);
 
+/// An opaque sRGB frame; contains no source capability or URL.
 #[derive(Debug, Clone)]
 pub struct Frame {
+    /// Quantized requested time in the native normalized timeline.
     pub requested: f64,
+    /// Actual decoded timestamp, which can differ on sparse media.
     pub actual: f64,
+    /// Color-conversion mode, including explicit Dolby Vision limitations.
     pub color: &'static str,
+    /// Opaque sRGB pixels suitable for an iced image widget.
     pub image: image::Handle,
 }
 
+/// The latest request's frame or an explicit source-scoped failure.
 #[derive(Debug, Clone)]
 pub struct Outcome {
+    /// Quantized native normalized target time.
     pub requested: f64,
+    /// Decoded frame or redacted diagnostic.
     pub result: Result<Frame, String>,
 }
 
@@ -108,7 +123,16 @@ pub struct Preview {
     shared: Arc<Shared>,
     worker: Option<thread::JoinHandle<()>>,
 }
+
+// Sharing the owner must not require a UI-held outer lock around cancellation.
+const _: fn() = || {
+    fn shared<T: Send + Sync>() {}
+    shared::<Preview>();
+};
 impl Preview {
+    /// Starts a lazy worker and returns its coalesced notification stream.
+    /// All operations except Drop use internal synchronization; an `Arc<Preview>`
+    /// can be shared without an external mutex.
     pub fn new(library: String) -> std::io::Result<(Self, futures::channel::mpsc::Receiver<()>)> {
         let (sender, receiver) = futures::channel::mpsc::channel(1);
         let shared = Arc::new(Shared {
@@ -136,8 +160,11 @@ impl Preview {
         ))
     }
 
-    /// Every call starts a new media generation, including reloading the same path.
-    pub fn set_media(&self, source: Option<String>) {
+    /// Starts a new generation, including same-path reloads. The borrowed resolved
+    /// path/URL is copied privately without rewriting credentials or query fields.
+    /// Retiring a source immediately invalidates pending results; native teardown
+    /// and cache release happen on the worker. No native call runs here.
+    pub fn set_media(&self, source: Option<&str>) {
         let mut mailbox = self.shared.mailbox.lock();
         mailbox.invalidate();
         mailbox.media = mailbox
@@ -173,6 +200,8 @@ impl Preview {
         Some(tick as f64 / 10.0)
     }
 
+    /// Invalidates pending output immediately without interrupting native calls.
+    /// The source and its bounded cache remain reusable.
     pub fn cancel(&self) {
         let mut mailbox = self.shared.mailbox.lock();
         if mailbox.target.is_some() {
@@ -218,7 +247,7 @@ impl Cache {
     fn insert(&mut self, tick: u64, frame: Frame) {
         self.0.retain(|(key, _)| *key != tick);
         if self.0.len() == CACHE_FRAMES {
-            self.0.pop_front();
+            let _ = self.0.pop_front();
         }
         self.0.push_back((tick, frame));
     }
@@ -312,6 +341,7 @@ fn run(shared: Arc<Shared>, library: String) {
             // Publish the failure before native teardown, which is a blocking
             // library boundary and is not covered by our operation deadline.
             decoder = None;
+            cache.0.clear();
         }
         if let Some(native_deadline) = decoder.as_ref().and_then(software::Decoder::deadline) {
             deadline = Some(deadline.map_or(native_deadline, |at| at.min(native_deadline)));

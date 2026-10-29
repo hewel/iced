@@ -99,7 +99,7 @@ def run(args):
 def compare_real(media, kind, report, library):
     """Integration reference, separate from the independent analytic fixtures."""
     output = report/kind
-    run(["cargo", "run", "--quiet", "-p", "mpv_sdr_gpu", "--example", "preview_smoke", "--",
+    run(["cargo", "run", "--quiet", "-p", "iced_mpv_preview", "--example", "preview_smoke", "--",
          media, "--libmpv", library, "--capture-at", "300", "--report", output])
     metadata = (output/"300.txt").read_text()
     required = "DV8 HDR10 base" if kind == "dv8" else "PQ HDR"
@@ -136,14 +136,14 @@ def main():
     parser.add_argument("--real-pq", type=Path, help="Compare a 16:9 PQ sample at 300 seconds")
     parser.add_argument("--real-dv8", type=Path, help="Compare a 16:9 DV8 HDR10-base sample at 300 seconds")
     options = parser.parse_args()
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     os.chdir(root)
     report = options.report.resolve()
     report.mkdir(parents=True, exist_ok=True)
     library = os.environ.get("LIBMPV", "/home/hewel/Codes/mpv/build/libmpv.so")
     pl = os.environ.get("PL_LIBDIR", str(Path.home()/".cache/mpv-preview-deps/libplacebo-7.387.0/install/lib"))
     os.environ["LD_LIBRARY_PATH"] = pl + (":"+os.environ["LD_LIBRARY_PATH"] if os.environ.get("LD_LIBRARY_PATH") else "")
-    subprocess.run(["cargo", "build", "-p", "mpv_sdr_gpu", "--example", "preview_smoke"], check=True)
+    subprocess.run(["cargo", "build", "-p", "iced_mpv_preview", "--example", "preview_smoke"], check=True)
     if options.real_pq or options.real_dv8:
         for kind, media in [("pq", options.real_pq), ("dv8", options.real_dv8)]:
             if media:
@@ -177,7 +177,7 @@ def main():
              "-color_trc", trc, "-color_primaries", "bt2020", "-colorspace", "0", "-color_range", "pc",
              "-i", raw, "-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp16le", media])
         output = report/transfer
-        run(["cargo", "run", "--quiet", "-p", "mpv_sdr_gpu", "--example", "preview_smoke", "--",
+        run(["cargo", "run", "--quiet", "-p", "iced_mpv_preview", "--example", "preview_smoke", "--",
              media, "--libmpv", library, "--capture-at", "0.5", "--report", output])
         pixels = (output/"0.5.rgba").read_bytes()
         errors = []

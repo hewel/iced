@@ -10,7 +10,6 @@ mod deadline;
 mod gpu;
 mod interop;
 mod pool;
-pub mod preview;
 mod video;
 
 use iced_wgpu::wgpu;

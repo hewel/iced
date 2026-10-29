@@ -1,0 +1,21 @@
+[package]
+name = "iced_mpv_preview"
+description = "Independent bounded libmpv software thumbnails for iced"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+iced_core.workspace = true
+futures.workspace = true
+libloading = "0.8"
+parking_lot = "0.12"
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+clap = { version = "4", features = ["derive"] }

@@ -423,78 +423,13 @@ where
         _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
-        let bounds = layout.bounds();
-
-        let style = theme.style(&self.class, self.status.unwrap_or(Status::Active));
-
-        let (handle_width, handle_height, handle_border_radius) = match style.handle.shape {
-            HandleShape::Circle { radius } => (radius * 2.0, radius * 2.0, radius.into()),
-            HandleShape::Rectangle {
-                width,
-                border_radius,
-            } => (f32::from(width), bounds.height, border_radius),
-        };
-
-        let value = self.value.as_() as f32;
-        let (range_start, range_end) = {
-            let (start, end) = self.range.clone().into_inner();
-
-            (start.as_() as f32, end.as_() as f32)
-        };
-
-        let offset = if range_start >= range_end {
-            0.0
-        } else {
-            (bounds.width - handle_width) * (value - range_start) / (range_end - range_start)
-        };
-
-        let rail_y = bounds.y + bounds.height / 2.0;
-
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle {
-                    x: bounds.x,
-                    y: rail_y - style.rail.width / 2.0,
-                    width: offset + handle_width / 2.0,
-                    height: style.rail.width,
-                },
-                border: style.rail.border,
-                ..renderer::Quad::default()
-            },
-            style.rail.backgrounds.0,
-        );
-
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle {
-                    x: bounds.x + offset + handle_width / 2.0,
-                    y: rail_y - style.rail.width / 2.0,
-                    width: bounds.width - offset - handle_width / 2.0,
-                    height: style.rail.width,
-                },
-                border: style.rail.border,
-                ..renderer::Quad::default()
-            },
-            style.rail.backgrounds.1,
-        );
-
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle {
-                    x: bounds.x + offset,
-                    y: rail_y - handle_height / 2.0,
-                    width: handle_width,
-                    height: handle_height,
-                },
-                border: Border {
-                    radius: handle_border_radius,
-                    smoothing: 0.0,
-                    width: style.handle.border_width,
-                    color: style.handle.border_color,
-                },
-                ..renderer::Quad::default()
-            },
-            style.handle.background,
+        draw(
+            renderer,
+            layout.bounds(),
+            self.value.as_() as f32,
+            (*self.range.start()).as_() as f32,
+            (*self.range.end()).as_() as f32,
+            theme.style(&self.class, self.status.unwrap_or(Status::Active)),
         );
     }
 
@@ -526,6 +461,73 @@ where
             mouse::Interaction::default()
         }
     }
+}
+
+pub(crate) fn draw(
+    renderer: &mut impl renderer::Renderer,
+    bounds: Rectangle,
+    value: f32,
+    range_start: f32,
+    range_end: f32,
+    style: Style,
+) {
+    let (handle_width, handle_height, handle_border_radius) = match style.handle.shape {
+        HandleShape::Circle { radius } => (radius * 2.0, radius * 2.0, radius.into()),
+        HandleShape::Rectangle {
+            width,
+            border_radius,
+        } => (f32::from(width), bounds.height, border_radius),
+    };
+    let offset = if range_start >= range_end {
+        0.0
+    } else {
+        (bounds.width - handle_width) * (value - range_start) / (range_end - range_start)
+    };
+    let rail_y = bounds.y + bounds.height / 2.0;
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds: Rectangle {
+                x: bounds.x,
+                y: rail_y - style.rail.width / 2.0,
+                width: offset + handle_width / 2.0,
+                height: style.rail.width,
+            },
+            border: style.rail.border,
+            ..renderer::Quad::default()
+        },
+        style.rail.backgrounds.0,
+    );
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds: Rectangle {
+                x: bounds.x + offset + handle_width / 2.0,
+                y: rail_y - style.rail.width / 2.0,
+                width: bounds.width - offset - handle_width / 2.0,
+                height: style.rail.width,
+            },
+            border: style.rail.border,
+            ..renderer::Quad::default()
+        },
+        style.rail.backgrounds.1,
+    );
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds: Rectangle {
+                x: bounds.x + offset,
+                y: rail_y - handle_height / 2.0,
+                width: handle_width,
+                height: handle_height,
+            },
+            border: Border {
+                radius: handle_border_radius,
+                smoothing: 0.0,
+                width: style.handle.border_width,
+                color: style.handle.border_color,
+            },
+            ..renderer::Quad::default()
+        },
+        style.handle.background,
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

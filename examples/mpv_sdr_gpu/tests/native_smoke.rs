@@ -1,11 +1,8 @@
 //! Opt-in real desktop acceptance. Requires a >= 10 second moving video and
 //! a compositor that honors fullscreen requests. Ordinary cargo test is headless.
 use iced::{Task, Widget, window};
-use mpv_sdr_gpu::{
-    Command, Player, PlayerEvent, Settings,
-    compositor::Compositor,
-    preview::{Frame, Preview},
-};
+use iced_mpv_preview::{Frame, Preview};
+use mpv_sdr_gpu::{Command, Player, PlayerEvent, Settings, compositor::Compositor};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
 
 #[derive(clap::Parser)]
@@ -366,7 +363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = options.player.source.clone();
     let (preview, preview_notifications) = if options.preview {
         let (preview, receiver) = Preview::new(options.player.libmpv.clone())?;
-        preview.set_media(Some(source.clone()));
+        preview.set_media(Some(&source));
         (Some(Rc::new(preview)), Some(receiver))
     } else {
         (None, None)

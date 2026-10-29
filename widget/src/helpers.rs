@@ -1205,6 +1205,22 @@ where
     Slider::new(range, value, on_change)
 }
 
+/// Creates a continuous timeline with transactional drag and keyboard actions.
+///
+/// The caller supplies units, source generation, decorated track and preview
+/// content; the widget owns gesture cancellation and viewport-clamped placement.
+pub fn timeline<'a, Message, Theme, Renderer>(
+    range: std::ops::RangeInclusive<f64>,
+    value: f64,
+    on_action: impl Fn(crate::timeline::Action) -> Message + 'a,
+) -> crate::timeline::Timeline<'a, Message, Theme, Renderer>
+where
+    Theme: crate::timeline::Catalog,
+    Renderer: crate::core::Renderer,
+{
+    crate::timeline::Timeline::new(range, value, on_action)
+}
+
 /// Creates a new [`VerticalSlider`].
 ///
 /// Sliders let users set a value by moving an indicator.

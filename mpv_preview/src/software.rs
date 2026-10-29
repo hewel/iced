@@ -1,12 +1,16 @@
+// All native pointers and callbacks are confined to this worker-owned module.
+#![allow(unsafe_code)]
+
 use super::color::{BASE_FILTER, Plan};
 use super::{Frame, HEIGHT, Request, Shared, WIDTH};
-use crate::deadline::NATIVE_OPERATION_TIMEOUT;
-use iced_winit::core::image;
+use iced_core::image;
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
+
+const NATIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[repr(C)]
 struct Event {
@@ -213,7 +217,7 @@ impl Decoder {
             (decoder.api.create_render)(&mut decoder.render, core, params.as_mut_ptr())
         })?;
         unsafe { (decoder.api.update_callback)(decoder.render, Some(wake), opaque) };
-        let source = CString::new(source).map_err(|error| error.to_string())?;
+        let source = CString::new(source).map_err(|_| "preview source contains a NUL byte")?;
         decoder.command(1, &[c"loadfile", &source])?;
         Ok(decoder)
     }
@@ -338,7 +342,7 @@ impl Decoder {
                     && ((self.request.is_some() && self.started)
                         || (!self.ready && self.loaded)) =>
                 {
-                    self.snapshot()?
+                    self.snapshot()?;
                 }
                 3 if event.userdata == 13 => {
                     self.api.check(event.error)?;

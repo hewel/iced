@@ -1,9 +1,10 @@
 mod controls;
-mod timeline;
+use iced_widget::timeline;
 
 use controls::Controls;
 use iced::{Subscription, Task, Theme, Widget, window};
-use mpv_sdr_gpu::{Player, PlayerEvent, Settings, compositor::Compositor, preview::Preview};
+use iced_mpv_preview::Preview;
+use mpv_sdr_gpu::{Player, PlayerEvent, Settings, compositor::Compositor};
 use std::time::Duration;
 
 #[derive(clap::Parser)]
@@ -63,7 +64,7 @@ impl App {
                             self.controls.preview_target(None);
                         }
                         PlayerEvent::MediaPath(path) => {
-                            self.preview.set_media(path.clone());
+                            self.preview.set_media(path.as_deref());
                             self.controls.preview_target(None);
                         }
                         _ => {}

@@ -1,10 +1,11 @@
-use crate::timeline::{Action, Timeline};
+use iced_mpv_preview as preview;
 use iced_wgpu::Renderer;
+use iced_widget::timeline::{Action, Timeline};
 use iced_widget::{
     Widget, bottom, button, checkbox, column, container, row, scrollable, slider, text,
 };
 use iced_winit::core::{Font, Pixels, Theme};
-use mpv_sdr_gpu::{Command, PlayerEvent, preview};
+use mpv_sdr_gpu::{Command, PlayerEvent};
 
 pub struct Controls {
     show_details: bool,
@@ -281,7 +282,7 @@ impl Controls {
         ]
         .spacing(6);
 
-        if let Some(target) = self.thumbnail_target {
+        let preview_content = self.thumbnail_target.map(|target| {
             let surface = match &self.thumbnail {
                 Some(Ok(frame)) => iced_widget::image(&frame.image)
                     .width(preview::WIDTH)
@@ -305,28 +306,28 @@ impl Controls {
                 ),
                 _ => format!("Preview target {target:.1} s"),
             };
-            content = content.push(column![surface, text(caption).size(14)].spacing(4).boxed());
-        } else {
-            // Preserve the timeline's child index across thumbnail visibility
-            // changes, otherwise a preview would destroy its active drag state.
-            content = content.push(iced_widget::space::vertical().height(0).boxed());
-        }
+            container(column![surface, text(caption).size(14)].spacing(4))
+                .padding(8)
+                .style(container::dark)
+                .boxed()
+        });
         if self.can_seek_absolute() {
             let duration = self.duration.unwrap_or(0.0);
-            content = content.push(
-                Widget::<Action, Theme, Renderer>::map(
-                    Timeline::new(
-                        self.seek_preview
-                            .or(self.pending_seek)
-                            .or(self.time_pos)
-                            .unwrap_or(0.0),
-                        duration,
-                    )
-                    .generation(self.media_revision),
-                    Message::Timeline,
-                )
-                .boxed(),
-            );
+            let mut timeline = Timeline::new(
+                0.0..=duration,
+                self.seek_preview
+                    .or(self.pending_seek)
+                    .or(self.time_pos)
+                    .unwrap_or(0.0),
+                Message::Timeline,
+            )
+            .generation(self.media_revision)
+            .step(5.0)
+            .shift_step(1.0);
+            if let Some(preview) = preview_content {
+                timeline = timeline.preview(preview);
+            }
+            content = content.push(timeline.boxed());
         } else {
             content = content.push(
                 text(

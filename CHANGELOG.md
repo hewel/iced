@@ -14,11 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Widget image `display_frame`, `mask_frame`, `visible_region`, and `tint` builders for glass buttons and full-card-masked progress strips. Linear gradients support an independent `reference_bounds` frame, keeping Hero fades aligned through smaller rounded masks.
 - Ordered live scene backdrop blur via `Renderer::blur_backdrop` and the drawing-only `widget::modal` wrapper. Background updates remain live; content above the marker stays sharp. Zero blur keeps the direct rendering path.
 - Cumulative `Renderer::blur_statistics`, shared offscreen blur regressions, an opt-in CPU/GPU timestamp measurement driver, and the `native_blur` manual acceptance example.
+- Media-agnostic `widget::timeline` with cancellable pointer/touch gestures, keyboard focus, a render-only custom track, and viewport-clamped caller preview content.
+- Lightweight `iced_mpv_preview` for independent, bounded libmpv software thumbnails from local or resolved HTTP(S) sources, including explicit HDR-to-sRGB conversion.
 
 ### Changed
 - Scrollbars use a 14-logical-pixel track and drag hit area by default while retaining a 10-logical-pixel drawn thumb. Explicit widths and hidden scrollbars remain supported.
 - `Image` gains a public `blur` field and `gradient::Linear` gains `reference_bounds`; explicit struct literals must initialize them. Custom renderers must implement `Renderer::blur_backdrop`.
 - Advanced `wgpu::Renderer::draw` calls with positive scene blur require an explicit clear color; `None` cannot preserve pre-existing pixels in a render-attachment-only target. Normal window composition already supplies the clear color.
+- `mpv_sdr_gpu` now consumes the shared timeline and preview package; its example-local copies and preview test entry points have moved to `mpv_preview`.
 
 ### Fixed
 - Scrollbar thumbs have a minimum length of 32 logical pixels, capped to their track. Dragging uses the actual available travel on both axes and anchors, preserves offsets when no travel is available, and keeps the axial grab position when pressing the thumb's expanded side hit area.
@@ -26,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gradient quad instance offsets and gradient shadows in the native GPU renderer.
 - Rotated fragmented image placement and atlas gutter sampling across source fragments.
 - Rounded raster images, transformed border dimensions, and snapped/rotated damage bounds in `tiny-skia`, without changing inherited clipping masks.
+- A temporarily disabled timeline retains existing keyboard focus across asynchronous busy cycles while cancelling preview gestures. It consumes supported seek keys without actions so they cannot fall through to global shortcuts; source replacement and actual unfocus still retire focus.
 
 ## [0.14.0] - 2025-12-07
 ### Added

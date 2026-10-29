@@ -2405,6 +2405,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iced_mpv_preview"
+version = "0.15.0-dev"
+dependencies = [
+ "clap",
+ "futures",
+ "iced_core",
+ "libloading",
+ "parking_lot",
+]
+
+[[package]]
 name = "iced_program"
 version = "0.15.0-dev"
 dependencies = [
@@ -3298,6 +3309,7 @@ dependencies = [
  "clap",
  "futures",
  "iced",
+ "iced_mpv_preview",
  "iced_wgpu",
  "iced_widget",
  "iced_winit",

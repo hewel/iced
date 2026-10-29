@@ -42,7 +42,13 @@ the thumbnail. A cancellation or completed seek suppresses hover preview until
 the pointer leaves and re-enters. The panel shows both the requested time and the
 actual decoded frame time; sparse-frame video need not land on the exact time.
 
-`preview::Preview` owns a lazy, independent libmpv software-render instance on a
+The rail is now the reusable `iced_widget::timeline`, with caller-owned preview
+content in its viewport-clamped overlay. Custom tracks can preserve product
+markers without duplicating input. The decoder is the standalone
+[`iced_mpv_preview`](../../mpv_preview/README.md) package; consumers do not link
+this example's GPU Host. The old example-local implementations were removed.
+
+`iced_mpv_preview::Preview` owns a lazy, independent libmpv software-render instance on a
 background thread. It does not share the Vulkan host, GPU queue, or playback
 commands. After creating the render context, it uses asynchronous client APIs
 and continues draining render updates while waiting for seek/restart events.
@@ -203,11 +209,22 @@ color correctness.
 ### Layer 1: timeline input and application state
 
 ```sh
+cargo test -p iced_widget timeline::tests
+cargo test -p iced_mpv_preview
 cargo test -p mpv_sdr_gpu --bin mpv_sdr_gpu
 cargo test -p mpv_sdr_gpu
 cargo clippy -p mpv_sdr_gpu --all-targets --no-deps -- -D warnings
 cargo fmt -p mpv_sdr_gpu -- --check
 ```
+
+The shared implementation additionally passed 9 timeline tests, 3 preview-library
+tests and 11 migrated example tests. Strict package-scoped Clippy/build passed
+for `iced_mpv_preview` and this example; formatting passed for all affected
+packages. Strict `iced_widget` Clippy is blocked only by the pre-existing
+`default_trait_access` diagnostic at `widget/src/backdrop.rs:138`.
+See the [shared-library stream acceptance](../../mpv_preview/README.md#shared-library-stream-acceptance)
+for authenticated HTTP/HLS commands, native-ack coordination, process-exit
+evidence and the remaining consuming-product desktop boundary.
 
 Timeline regressions replay `Widget::update` with a headless renderer, including
 multiple events before a view rebuild, cancellation followed by release, and
@@ -215,12 +232,26 @@ accumulating keyboard targets. Additional input-state tests cover touch ownershi
 and focus. Controls tests reject stale seek completions and accept sparse-frame
 and same-position results. These tests do not open a window or call libmpv.
 
+Busy admission may temporarily set the timeline to `enabled(false)` without
+changing its generation. This cancels pointer/hover demand and rejects input,
+but retains existing keyboard focus across re-enabling. Generation replacement,
+window unfocus, explicit focus operations and outside presses still retire that
+focus. Regression replay covers drag commit, repeated disabled rebuilds, no
+disabled/late-release seek, then Left/Right/Shift-Left/Home after each busy cycle.
+It also covers the four focus-retirement paths. Keep transient busy state out of
+source generations; native product keyboard acceptance remains a consumer check.
+While focused and disabled, arrows/Home/End with no Ctrl/Alt/Logo modifier
+(including Shift) are captured without a seek action, preventing fallback to
+application-wide shortcuts. Tab, Shift-Tab, unrelated keys and modified shortcuts
+remain ignored. Regression replay asserts both emitted messages and event status,
+including ignored seek keys after focus retirement.
+
 ### Layer 2: real libmpv request/result isolation
 
 The independent worker can be exercised without a desktop:
 
 ```sh
-cargo run -p mpv_sdr_gpu --example preview_smoke -- \
+cargo run -p iced_mpv_preview --example preview_smoke -- \
   "$MEDIA_ROOT/bbb_h264_aac_1080p.mp4" --libmpv "$LIBMPV" \
   --report "$REPORT_ROOT/preview-h264"
 ```
@@ -250,7 +281,7 @@ isolation or UI composition; those remain Layer 3.
 #### Independent HDR color acceptance
 
 ```sh
-python3 examples/mpv_sdr_gpu/tests/verify_preview_color.py \
+python3 mpv_preview/tests/verify_preview_color.py \
   --report "$REPORT_ROOT/color-oracle"
 ```
 
@@ -272,7 +303,7 @@ Every native invocation has a process-level timeout covering shutdown.
 Compare the real 16:9 PQ and DV8 HDR10-base samples at 300 seconds:
 
 ```sh
-python3 examples/mpv_sdr_gpu/tests/verify_preview_color.py \
+python3 mpv_preview/tests/verify_preview_color.py \
   --report "$REPORT_ROOT/real-color-reference" \
   --real-pq "$MEDIA_ROOT/One Hundred Years of Solitude - S01E12 - The Innocent Train Had Arrived - [WEBDL-2160p][h265-10bit][EAC3 Atmos].mkv" \
   --real-dv8 "$MEDIA_ROOT/Star.Wars.Andor.S02E10.Make.It.Stop.2160p.DSNP.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.mkv"
@@ -288,7 +319,7 @@ physical-display color acceptance is implied.
 Run the repeatable, desktop-free lifecycle acceptance:
 
 ```sh
-bash examples/mpv_sdr_gpu/tests/verify_preview.sh \
+bash mpv_preview/tests/verify_preview.sh \
   "$MEDIA_ROOT/bbb_h264_aac_1080p.mp4"
 ```
 
@@ -300,7 +331,7 @@ It uses the environment variables above, generates a temporary MPEG-TS FIFO
 with ffmpeg, and removes only that fixture and its producer. The FIFO producer
 may report Broken pipe when the rejected preview closes its reader.
 
-The three opt-in tests under `preview::tests::native` first obtain a frame from
+The three opt-in tests under `iced_mpv_preview::tests::native` first obtain a frame from
 the configured color pipeline, not just the disposable metadata probe. They
 then synchronize at a real libmpv seek command acknowledgement before the worker
 may consume completion:
@@ -328,20 +359,18 @@ an acknowledged request still in flight. Context/core destruction and worker joi
 returned within the process guard. Reproduce with:
 
 ```sh
-cargo test -p mpv_sdr_gpu --lib --no-run
+cargo test -p iced_mpv_preview --lib --no-run
 MPV_PREVIEW_TEST_MEDIA="$MEDIA_ROOT/One Hundred Years of Solitude - S01E12 - The Innocent Train Had Arrived - [WEBDL-2160p][h265-10bit][EAC3 Atmos].mkv" \
-  timeout --kill-after=5s 45s cargo test -p mpv_sdr_gpu --lib \
-  preview::tests::native -- --ignored --test-threads=1 --nocapture
+  timeout --kill-after=5s 45s cargo test -p iced_mpv_preview --lib \
+  tests::native -- --ignored --test-threads=1 --nocapture
 ```
 
-On the restored persistent libplacebo installation, the long-H264 worker run and
-FIFO rejection/teardown passed the process guards. Ordinary
-`cargo test -p mpv_sdr_gpu` passed 19 tests and skipped the three opt-in native
-tests. `cargo fmt -p mpv_sdr_gpu --check`, the application build, and package-scoped
-`cargo clippy -p mpv_sdr_gpu --all-targets --no-deps -- -D warnings` passed.
-Dependency-inclusive strict Clippy is currently blocked by unrelated diagnostics
-in `wgpu/src/blur.rs` and `wgpu/src/image/progressive.rs`; those files were not
-changed for this task.
+Before shared-library extraction, the restored persistent libplacebo installation
+passed the long-H264 worker and FIFO process guards, 19 ordinary example tests,
+format/build and package-scoped strict Clippy. These are historical results for
+the example-local implementation, not acceptance of changed shared modules.
+Dependency-inclusive strict Clippy also reported unrelated diagnostics in
+`wgpu/src/blur.rs` and `wgpu/src/image/progressive.rs`; those files were not changed.
 
 ### Layer 3: actual native UI and GPU integration
 
@@ -485,9 +514,10 @@ dominant variable and the first request includes native initialization.
 
 #### Unlocked desktop acceptance
 
-Final acceptance used dedicated windows on niri, a 1.75-scale output, the
-persistent libplacebo installation, and Host ABI v3. Existing user players and
-lock-screen settings were not operated. No backend matrix was rerun.
+The pre-extraction acceptance used dedicated windows on niri, a 1.75-scale output,
+the persistent libplacebo installation, and Host ABI v3. Existing user players
+and lock-screen settings were not operated. This historical desktop evidence does
+not substitute for the consuming product's shared-widget/stream acceptance.
 
 - `native_smoke --preview --seek-only` passed two fresh screenshots, separate
   video/overlay pixel checks, fractional and same-position seek completion, and
